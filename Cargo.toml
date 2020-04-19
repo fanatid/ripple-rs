@@ -12,6 +12,9 @@ publish = false
 [dependencies]
 clap = "2.33.0"
 
+[build-dependencies]
+git2 = "0.13"
+
 [[bin]]
 name = "rrd"
 path = "rrd/main.rs"

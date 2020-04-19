@@ -15,6 +15,5 @@
 mod args;
 
 fn main() {
-    let args = args::Args::default();
-    println!("{:?}", args.get_matches());
+    let _args = args::get_args();
 }
