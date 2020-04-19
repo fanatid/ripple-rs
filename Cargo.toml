@@ -1,0 +1,17 @@
+[package]
+name = "rrd"
+version = "0.1.0"
+authors = ["Kirill Fomichev <fanatid@ya.ru>"]
+edition = "2018"
+description = "Rust Ripple daemon (Ripple node on Rust)"
+readme = "README.md"
+repository = "https://github.com/fanatid/ripple-rs"
+license = "MIT"
+publish = false
+
+[dependencies]
+clap = "2.33.0"
+
+[[bin]]
+name = "rrd"
+path = "rrd/main.rs"
