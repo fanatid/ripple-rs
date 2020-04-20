@@ -6,6 +6,8 @@ edition = "2018"
 publish = false
 
 [dependencies]
+bs58 = { version = "0.3.0", features = ["check"] }
+hex = "0.4.2"
 lazy_static = "1.4.0"
 sha2 = "0.8.1"
-secp256k1 = "0.17.2"
+secp256k1 = { version = "0.17.2", features = ["rand", "rand-std"] }

@@ -1,26 +1,25 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BytesMut};
-use crypto::secp256k1::{Message, SecretKey};
-use crypto::SECP256K1;
+use crypto::secp256k1::Message;
 use crypto::sha2::{Digest, Sha512};
+use crypto::Secp256k1Keys;
 use openssl::ssl;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-const NODE_PRIVATE_KEY: &str = "e55dc8f3741ac9668dbe858409e5d64f5ce88380f7228eccfe82b92b2c7848ba";
-const NODE_PUBLIC_KEY_BASE58: &str = "n9KAa2zVWjPHgfzsE3iZ8HAbzJtPrnoh4H2M2HgE7dfqtvyEb1KJ";
 
 /// Single connection to ripple node.
 #[derive(Debug)]
 pub struct Peer {
     addr: SocketAddr,
+    node_key: Arc<Secp256k1Keys>,
 }
 
 impl Peer {
     /// Create peer from [`SocketAddr`][std::net::SocketAddr].
-    pub fn from_addr(addr: SocketAddr) -> Peer {
-        Peer { addr }
+    pub fn from_addr(addr: SocketAddr, node_key: Arc<Secp256k1Keys>) -> Peer {
+        Peer { addr, node_key }
     }
 
     /// Attempt connect to peer.
@@ -68,8 +67,7 @@ impl Peer {
             .collect::<Vec<u8>>();
         let msg = Message::from_slice(&Sha512::digest(&mix[..])[0..32])?;
 
-        let sk = SecretKey::from_slice(&hex::decode(NODE_PRIVATE_KEY)?)?;
-        let sig = SECP256K1.sign(&msg, &sk).serialize_der();
+        let sig = self.node_key.sign(&msg).serialize_der();
         let b64sig = base64::encode(&sig);
 
         let content = format!(
@@ -82,7 +80,8 @@ impl Peer {
             Public-Key: {}\r\n\
             Session-Signature: {}\r\n\
             \r\n",
-            NODE_PUBLIC_KEY_BASE58, b64sig
+            self.node_key.get_public_key_bs58(),
+            b64sig
         );
         stream.write_all(content.as_bytes()).await?;
 

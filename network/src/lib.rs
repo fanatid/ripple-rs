@@ -12,7 +12,9 @@
 //! Our bridge to ripple network.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use crypto::Secp256k1Keys;
 use futures::future::join_all;
 use tokio::net::lookup_host;
 
@@ -24,7 +26,8 @@ mod peer;
 #[derive(Debug)]
 pub struct Network {
     // nodes_max: usize,
-// peers: Vec<Peer>,
+    // peers: Vec<Peer>,
+    node_key: Arc<Secp256k1Keys>,
 }
 
 impl Network {
@@ -34,6 +37,7 @@ impl Network {
         Network {
             // nodes_max: 1,
             // peers: vec![],
+            node_key: Arc::new(Secp256k1Keys::random()),
         }
     }
 
@@ -43,7 +47,7 @@ impl Network {
 
         for addr in addrs {
             if addr.is_ipv4() {
-                let peer = Peer::from_addr(addr);
+                let peer = Peer::from_addr(addr, self.node_key.clone());
                 if let Err(error) = peer.connect().await {
                     log::error!("Failed connect to peer {}: {}", addr, error);
                 }
