@@ -1,0 +1,11 @@
+[package]
+name = "crypto"
+version = "0.1.0"
+authors = ["Kirill Fomichev <fanatid@ya.ru>"]
+edition = "2018"
+publish = false
+
+[dependencies]
+lazy_static = "1.4.0"
+sha2 = "0.8.1"
+secp256k1 = "0.17.2"

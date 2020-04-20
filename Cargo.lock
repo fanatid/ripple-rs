@@ -130,6 +130,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3a71ab494c0b5b860bdc8407ae08978052417070c2ced38573a9157ad75b8ac"
 
 [[package]]
+name = "crypto"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+ "secp256k1",
+ "sha2",
+]
+
+[[package]]
 name = "digest"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -529,14 +538,13 @@ dependencies = [
  "base64",
  "byteorder",
  "bytes",
+ "crypto",
  "futures",
  "hex",
  "httparse",
  "log 0.1.0",
  "native-tls",
  "openssl",
- "secp256k1",
- "sha2",
  "tokio",
  "tokio-tls",
 ]

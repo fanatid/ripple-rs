@@ -2,9 +2,10 @@ use std::net::SocketAddr;
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BytesMut};
+use crypto::secp256k1::{Message, SecretKey};
+use crypto::SECP256K1;
+use crypto::sha2::{Digest, Sha512};
 use openssl::ssl;
-use secp256k1::{Message, Secp256k1, SecretKey};
-use sha2::{Digest, Sha512};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const NODE_PRIVATE_KEY: &str = "e55dc8f3741ac9668dbe858409e5d64f5ce88380f7228eccfe82b92b2c7848ba";
@@ -67,9 +68,8 @@ impl Peer {
             .collect::<Vec<u8>>();
         let msg = Message::from_slice(&Sha512::digest(&mix[..])[0..32])?;
 
-        let secp = Secp256k1::new();
         let sk = SecretKey::from_slice(&hex::decode(NODE_PRIVATE_KEY)?)?;
-        let sig = secp.sign(&msg, &sk).serialize_der();
+        let sig = SECP256K1.sign(&msg, &sk).serialize_der();
         let b64sig = base64::encode(&sig);
 
         let content = format!(

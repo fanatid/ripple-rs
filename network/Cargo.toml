@@ -14,9 +14,8 @@ hex = "0.4.2"
 httparse = "1.3.4"
 native-tls = "0.2.4"
 openssl = "0.10.29"
-sha2 = "0.8.1"
-secp256k1 = "0.17.2"
 tokio = { version = "0.2", features = ["io-util", "tcp", "dns"] }
 tokio-tls = "0.3.0"
 # local
+crypto = { path = "../crypto" }
 log = { path = "../log" }
