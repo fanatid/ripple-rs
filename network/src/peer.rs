@@ -3,23 +3,23 @@ use std::sync::Arc;
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BytesMut};
-use crypto::secp256k1::Message;
-use crypto::sha2::{Digest, Sha512};
 use crypto::Secp256k1Keys;
 use openssl::ssl;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::handshake;
+
 /// Single connection to ripple node.
 #[derive(Debug)]
 pub struct Peer {
-    addr: SocketAddr,
     node_key: Arc<Secp256k1Keys>,
+    addr: SocketAddr,
 }
 
 impl Peer {
     /// Create peer from [`SocketAddr`][std::net::SocketAddr].
     pub fn from_addr(addr: SocketAddr, node_key: Arc<Secp256k1Keys>) -> Peer {
-        Peer { addr, node_key }
+        Peer { node_key, addr }
     }
 
     /// Attempt connect to peer.
@@ -43,33 +43,6 @@ impl Peer {
             (*(&stream as *const _ as *const ssl::SslStream<[u8; 64]>)).ssl()
         };
 
-        let mut buf = Vec::<u8>::with_capacity(4096);
-        buf.resize(buf.capacity(), 0);
-
-        let mut size = ss.finished(&mut buf[..]);
-        if size > buf.len() {
-            buf.resize(size, 0);
-            size = ss.finished(&mut buf[..]);
-        }
-        let cookie1 = Sha512::digest(&buf[..size]);
-
-        let mut size = ss.peer_finished(&mut buf[..]);
-        if size > buf.len() {
-            buf.resize(size, 0);
-            size = ss.peer_finished(&mut buf[..]);
-        }
-        let cookie2 = Sha512::digest(&buf[..size]);
-
-        let mix = cookie1
-            .iter()
-            .zip(cookie2.iter())
-            .map(|(a, b)| a ^ b)
-            .collect::<Vec<u8>>();
-        let msg = Message::from_slice(&Sha512::digest(&mix[..])[0..32])?;
-
-        let sig = self.node_key.sign(&msg).serialize_der();
-        let b64sig = base64::encode(&sig);
-
         let content = format!(
             "\
             GET / HTTP/1.1\r\n\
@@ -81,62 +54,20 @@ impl Peer {
             Session-Signature: {}\r\n\
             \r\n",
             self.node_key.get_public_key_bs58(),
-            b64sig
+            handshake::create_signature(ss, &self.node_key)
         );
         stream.write_all(content.as_bytes()).await?;
 
+        let (code, body) = handshake::read_response(&mut stream).await?;
+        match code {
+            101 => {}
+            503 => panic!("More peers..."),
+            _ => {
+                panic!("Code: {}, body: {}", code, String::from_utf8_lossy(&body));
+            }
+        };
+
         let mut buf = BytesMut::new();
-        loop {
-            if stream.read_buf(&mut buf).await? == 0 {
-                println!(
-                    "Current buffer: {}",
-                    String::from_utf8_lossy(buf.bytes()).trim()
-                );
-                panic!("socket closed");
-            }
-
-            if let Some(n) = buf.bytes().windows(4).position(|x| x == b"\r\n\r\n") {
-                let mut headers = [httparse::EMPTY_HEADER; 32];
-                let mut resp = httparse::Response::new(&mut headers);
-                let status = resp.parse(&buf[0..n + 4]).expect("response parse success");
-                if status.is_partial() {
-                    panic!("Invalid headers");
-                }
-
-                let response_code = resp.code.unwrap();
-                println!(
-                    "Response: version {}, code {}, reason {}",
-                    resp.version.unwrap(),
-                    resp.code.unwrap(),
-                    resp.reason.unwrap()
-                );
-                for header in headers.iter().filter(|h| **h != httparse::EMPTY_HEADER) {
-                    println!("{}: {}", header.name, String::from_utf8_lossy(header.value));
-                }
-
-                buf.advance(n + 4);
-
-                if response_code != 101 {
-                    loop {
-                        if stream.read_buf(&mut buf).await? == 0 {
-                            println!("Body: {}", String::from_utf8_lossy(buf.bytes()).trim());
-                            return Ok(());
-                        }
-                    }
-                }
-
-                if !buf.is_empty() {
-                    println!(
-                        "Current buffer: {}",
-                        String::from_utf8_lossy(buf.bytes()).trim()
-                    );
-                    panic!("buffer should be empty");
-                }
-
-                break;
-            }
-        }
-
         loop {
             if stream.read_buf(&mut buf).await? == 0 {
                 println!(

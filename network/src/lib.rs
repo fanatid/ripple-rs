@@ -20,6 +20,7 @@ use tokio::net::lookup_host;
 
 pub use peer::Peer;
 
+mod handshake;
 mod peer;
 
 /// Peers collection and communication through ripple protocol.
