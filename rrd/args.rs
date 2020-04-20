@@ -10,6 +10,7 @@ pub enum Args {
 #[derive(Debug)]
 pub struct ConfigNode {}
 
+/// Parse program arguments to [`Args`][Args].
 pub fn get_args() -> Args {
     let version = include_str!("./args.rs-version").trim();
     if version.split_whitespace().collect::<Vec<&str>>()[0] != crate_version!() {
