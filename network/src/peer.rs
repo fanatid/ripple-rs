@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use crypto::Secp256k1Keys;
 use openssl::ssl;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -87,6 +87,7 @@ impl Peer {
             }
         };
 
+        // TODO: pass `body` as extra readed bytes
         self.read_messages();
 
         Ok(())
@@ -103,11 +104,13 @@ impl Peer {
     }
 
     fn read_messages(self: &Arc<Self>) {
-        let this = self.clone();
+        let peer = Arc::clone(self);
         let _join_handle = tokio::spawn(async move {
+            // TODO: fiture out buffer required for most of messages.
+            // let mut buf = [0u8; 128 * 1024]; // 128 KiB
             let mut buf = BytesMut::new();
             loop {
-                match this.stream.lock().await.read_buf(&mut buf).await {
+                match peer.stream.lock().await.read_buf(&mut buf).await {
                     Ok(size) => {
                         if size == 0 {
                             println!(
@@ -140,32 +143,10 @@ impl Peer {
                         break;
                     }
 
-                    let tp = match message_type {
-                        2 => "mtMANIFESTS",
-                        3 => "mtPING",
-                        5 => "mtCLUSTER",
-                        15 => "mtENDPOINTS",
-                        30 => "mtTRANSACTION",
-                        31 => "mtGET_LEDGER",
-                        32 => "mtLEDGER_DATA",
-                        33 => "mtPROPOSE_LEDGER",
-                        34 => "mtSTATUS_CHANGE",
-                        35 => "mtHAVE_SET",
-                        41 => "mtVALIDATION",
-                        42 => "mtGET_OBJECTS",
-                        50 => "mtGET_SHARD_INFO",
-                        51 => "mtSHARD_INFO",
-                        52 => "mtGET_PEER_SHARD_INFO",
-                        53 => "mtPEER_SHARD_INFO",
-                        54 => "mtVALIDATORLIST",
-                        _ => "",
-                    };
-                    match tp {
-                        "" => panic!("Received unknow message: {}", message_type),
-                        _ => println!("Received message {}, size {}", tp, payload_size),
-                    }
-
-                    buf.advance(payload_size + 6);
+                    let bytes = Bytes::copy_from_slice(&buf.bytes()[6..6 + payload_size]);
+                    let msg = protocol::Message::decode(message_type as i32, bytes);
+                    println!("Received: {:?}", msg);
+                    buf.advance(6 + payload_size);
                 }
             }
         });

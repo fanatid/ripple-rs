@@ -18,3 +18,4 @@ tokio-tls = "0.3.0"
 # local
 crypto = { path = "../crypto" }
 log = { path = "../log" }
+protocol = { path = "../protocol" }

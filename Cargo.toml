@@ -29,5 +29,6 @@ members = [
     "bs58",
     "crypto",
     "log",
-    "network"
+    "network",
+    "protocol"
 ]
