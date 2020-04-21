@@ -6,7 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies]
-bs58 = { version = "0.3.0", features = ["check"] }
+bs58 = { path = "../bs58" }
 hex = "0.4.2"
 lazy_static = "1.4.0"
 sha2 = "0.8.1"

@@ -39,12 +39,8 @@ impl Secp256k1Keys {
 
     /// Serialize PublicKey to base58.
     pub fn get_public_key_bs58(&self) -> String {
-        let mut bytes = Vec::with_capacity(34);
-        bytes.push(28);
-        bytes.extend_from_slice(&self.public_key.serialize());
-        bs58::encode::EncodeBuilder::new(&bytes, bs58::alphabet::RIPPLE)
-            .with_check()
-            .into_string()
+        let serialized = self.public_key.serialize();
+        bs58::encode(bs58::Version::NodePublic, &serialized[..])
     }
 
     /// Sign [`secp256k1::Message`][secp256k1::Message].

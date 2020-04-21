@@ -26,6 +26,7 @@ path = "rrd/main.rs"
 
 [workspace]
 members = [
+    "bs58",
     "crypto",
     "log",
     "network"
