@@ -39,6 +39,10 @@ pub(crate) fn create_signature(ssl: &SslRef, keys: &Secp256k1Keys) -> String {
 
 // pub(crate) fn verify_signature
 
+// pub(crate) async fn send_request() -> Result<(), Box<dyn std::error::Error>> {
+//     Ok(())
+// }
+
 pub(crate) async fn read_response<T: AsyncRead>(
     stream: &mut T,
 ) -> Result<(u16, BytesMut), Box<dyn std::error::Error>> {
@@ -68,3 +72,6 @@ pub(crate) async fn read_response<T: AsyncRead>(
 
     Ok((code, buf))
 }
+
+// pub(crate) async fn read_request
+// pub(crate) async fn send_response

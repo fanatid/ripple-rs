@@ -48,16 +48,24 @@ impl Network {
 
         for addr in addrs {
             if addr.is_ipv4() {
-                let peer = Peer::from_addr(addr, self.node_key.clone());
-                if let Err(error) = peer.connect().await {
-                    log::error!("Failed connect to peer {}: {}", addr, error);
-                }
-
-                break;
+                match Peer::from_addr(addr, self.node_key.clone()).await {
+                    Ok(peer) => match peer.connect().await {
+                        Ok(_) => break,
+                        Err(error) => {
+                            log::error!("Failed handshake with peer {}: {}", addr, error);
+                        }
+                    },
+                    Err(error) => {
+                        log::error!("Failed connect to peer {}: {}", addr, error);
+                    }
+                };
             }
         }
 
-        Ok(())
+        // Temporary, `connect` is block_on function.
+        #[allow(clippy::empty_loop)]
+        loop {}
+        // Ok(())
     }
 
     /// Return pre-defined nodes.
