@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "bs58"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "bs58 0.3.1",
 ]
@@ -168,9 +168,9 @@ checksum = "b3a71ab494c0b5b860bdc8407ae08978052417070c2ced38573a9157ad75b8ac"
 
 [[package]]
 name = "crypto"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
- "bs58 0.1.0",
+ "bs58 0.0.0",
  "hex",
  "lazy_static",
  "secp256k1",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "env_logger",
  "log 0.4.8",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "network"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "base64",
  "byteorder",
@@ -637,7 +637,7 @@ dependencies = [
  "crypto",
  "futures",
  "httparse",
- "log 0.1.0",
+ "log 0.0.0",
  "native-tls",
  "openssl",
  "protocol",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "bytes",
  "prost",
@@ -1021,11 +1021,11 @@ dependencies = [
 
 [[package]]
 name = "rrd"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "clap",
  "git2",
- "log 0.1.0",
+ "log 0.0.0",
  "network",
  "num_cpus",
  "tokio",

@@ -1,6 +1,6 @@
 [package]
 name = "rrd"
-version = "0.1.0"
+version = "0.0.0"
 authors = ["Kirill Fomichev <fanatid@ya.ru>"]
 edition = "2018"
 description = "Rust Ripple daemon (Ripple node on Rust)"
