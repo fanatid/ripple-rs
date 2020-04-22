@@ -42,14 +42,18 @@ impl Network {
     }
 
     /// Connect to resolved nodes.
-    pub async fn connect(&self) -> Result<(), std::convert::Infallible> {
+    pub async fn connect(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addrs = Self::get_bootstrap_addrs().await;
 
         for addr in addrs {
             if addr.is_ipv4() {
                 match Peer::from_addr(addr, self.node_key.clone()).await {
-                    Ok(peer) => match peer.connect().await {
-                        Ok(_) => break,
+                    Ok(mut peer) => match peer.connect().await {
+                        Ok(_) => loop {
+                            let msg = peer.read_message().await?;
+                            let dbg = format!("{:?}", msg);
+                            println!("Received: {:?}", dbg.split('(').next().unwrap());
+                        },
                         Err(error) => {
                             log::error!("Failed handshake with peer {}: {}", addr, error);
                         }
@@ -61,10 +65,7 @@ impl Network {
             }
         }
 
-        // Temporary, `connect` is block_on function.
-        #[allow(clippy::empty_loop)]
-        loop {}
-        // Ok(())
+        Ok(())
     }
 
     /// Return pre-defined nodes.

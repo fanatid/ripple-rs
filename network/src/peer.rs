@@ -8,7 +8,6 @@ use crypto::{secp256k1::Message, Secp256k1Keys};
 use openssl::ssl;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio_tls::TlsStream;
 
 // /// Peer builder.
@@ -24,8 +23,10 @@ use tokio_tls::TlsStream;
 /// Single connection to ripple node.
 #[derive(Debug)]
 pub struct Peer {
+    // node_key as ref?
     node_key: Arc<Secp256k1Keys>,
-    stream: Mutex<TlsStream<TcpStream>>,
+    stream: TlsStream<TcpStream>,
+    read_buf: BytesMut,
 }
 
 impl Peer {
@@ -39,7 +40,7 @@ impl Peer {
     pub async fn from_addr(
         addr: SocketAddr,
         node_key: Arc<Secp256k1Keys>,
-    ) -> Result<Arc<Peer>, Box<dyn std::error::Error>> {
+    ) -> Result<Peer, Box<dyn std::error::Error>> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
 
@@ -51,14 +52,15 @@ impl Peer {
         let cx = tokio_tls::TlsConnector::from(cx);
         let stream = cx.connect("", stream).await?;
 
-        Ok(Arc::new(Peer {
+        Ok(Peer {
             node_key,
-            stream: Mutex::new(stream),
-        }))
+            stream,
+            read_buf: BytesMut::with_capacity(128 * 1024),
+        })
     }
 
     /// Sned handshake message and run read messages loop if handshake successful.
-    pub async fn connect(self: &Arc<Self>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn connect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.handshake_send_request().await?;
 
         let (code, body) = self.handshake_read_response().await?;
@@ -70,14 +72,12 @@ impl Peer {
             }
         };
 
-        // TODO: pass `body` as extra readed bytes
-        self.read_messages();
+        // TODO: save `body` as extra readed bytes
 
         Ok(())
     }
 
-    async fn handshake_send_request(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut stream = self.stream.lock().await;
+    async fn handshake_send_request(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let content = format!(
             "\
             GET / HTTP/1.1\r\n\
@@ -91,16 +91,17 @@ impl Peer {
             self.node_key.get_public_key_bs58(),
             create_signature(self.get_sslref(), &self.node_key)
         );
-        stream.write_all(content.as_bytes()).await?;
+        self.stream.write_all(content.as_bytes()).await?;
 
         Ok(())
     }
 
-    async fn handshake_read_response(&self) -> Result<(u16, BytesMut), Box<dyn std::error::Error>> {
-        let mut stream = self.stream.lock().await;
+    async fn handshake_read_response(
+        &mut self,
+    ) -> Result<(u16, BytesMut), Box<dyn std::error::Error>> {
         let mut buf = BytesMut::new();
         let code = loop {
-            if stream.read_buf(&mut buf).await? == 0 {
+            if self.stream.read_buf(&mut buf).await? == 0 {
                 println!(
                     "Current buffer: {}",
                     String::from_utf8_lossy(buf.bytes()).trim()
@@ -119,7 +120,7 @@ impl Peer {
         };
 
         if code != 101 {
-            while stream.read_buf(&mut buf).await? > 0 {}
+            while self.stream.read_buf(&mut buf).await? > 0 {}
         }
 
         Ok((code, buf))
@@ -135,54 +136,47 @@ impl Peer {
         }
     }
 
-    fn read_messages(self: &Arc<Self>) {
-        let peer = Arc::clone(self);
-        let _join_handle = tokio::spawn(async move {
-            // TODO: fiture out buffer required for most of messages.
-            // let mut buf = [0u8; 128 * 1024]; // 128 KiB
-            let mut buf = BytesMut::new();
-            loop {
-                match peer.stream.lock().await.read_buf(&mut buf).await {
-                    Ok(size) => {
-                        if size == 0 {
-                            println!(
-                                "Current buffer: {}",
-                                String::from_utf8_lossy(buf.bytes()).trim()
-                            );
-                            panic!("socket closed");
-                        }
-                    }
-                    Err(error) => {
-                        panic!("Socket read error: {}", error);
+    /// Read message from peer.
+    pub async fn read_message(&mut self) -> Result<protocol::Message, Box<dyn std::error::Error>> {
+        // TODO: fiture out buffer required for most of messages.
+        loop {
+            match self.stream.read_buf(&mut self.read_buf).await {
+                Ok(size) => {
+                    if size == 0 {
+                        println!(
+                            "Current buffer: {}",
+                            String::from_utf8_lossy(self.read_buf.bytes()).trim()
+                        );
+                        panic!("socket closed");
                     }
                 }
-
-                while buf.len() > 6 {
-                    let bytes = buf.bytes();
-
-                    if bytes[0] & 0xFC != 0 {
-                        panic!("Unknow version header");
-                    }
-
-                    let payload_size = BigEndian::read_u32(&bytes[0..4]) as usize;
-                    let message_type = BigEndian::read_u16(&bytes[4..6]);
-
-                    if payload_size > 64 * 1024 * 1024 {
-                        panic!("Too big message size");
-                    }
-
-                    if buf.len() < 6 + payload_size {
-                        break;
-                    }
-
-                    let bytes = Bytes::copy_from_slice(&buf.bytes()[6..6 + payload_size]);
-                    let msg = protocol::Message::decode(message_type as i32, bytes);
-                    let s = format!("{:?}", msg.unwrap());
-                    println!("Received: {:?}", s.split('(').next().unwrap());
-                    buf.advance(6 + payload_size);
+                Err(error) => {
+                    panic!("Socket read error: {}", error);
                 }
             }
-        });
+
+            if self.read_buf.len() > 6 {
+                let bytes = self.read_buf.bytes();
+
+                if bytes[0] & 0xFC != 0 {
+                    panic!("Unknow version header");
+                }
+
+                let payload_size = BigEndian::read_u32(&bytes[0..4]) as usize;
+                let message_type = BigEndian::read_u16(&bytes[4..6]);
+
+                if payload_size > 64 * 1024 * 1024 {
+                    panic!("Too big message size");
+                }
+
+                if self.read_buf.len() >= 6 + payload_size {
+                    let bytes = Bytes::copy_from_slice(&self.read_buf.bytes()[6..6 + payload_size]);
+                    let msg = protocol::Message::decode(message_type as i32, bytes)?;
+                    self.read_buf.advance(6 + payload_size);
+                    return Ok(msg);
+                }
+            }
+        }
     }
 
     // pub async fn send_message(&self, ?) -> Result<(), ?> {
