@@ -12,6 +12,8 @@
 
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate quick_error;
 
 // re-export internal
 pub use secp256k1;

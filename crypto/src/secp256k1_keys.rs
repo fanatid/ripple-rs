@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::convert::Infallible;
 
 use secp256k1::rand::rngs::OsRng;
 use secp256k1::{Message, PublicKey, SecretKey, Signature};
@@ -23,20 +22,24 @@ impl Secp256k1Keys {
     }
 
     /// Create struct from serialized SecretKey in hex.
-    pub fn from_hex<T: AsRef<[u8]>>(data: T) -> Result<Secp256k1Keys, Infallible> {
+    pub fn from_hex<T: AsRef<[u8]>>(data: T) -> Result<Secp256k1Keys, KeysError> {
         let mut bytes = [0u8; 32];
-        hex::decode_to_slice(data, &mut bytes).expect("valid hex");
-        let secret_key = SecretKey::from_slice(&bytes).expect("valid secret key");
+        hex::decode_to_slice(data, &mut bytes).map_err(|_| KeysError::InvalidSecretKeyHex)?;
+        let secret_key = SecretKey::from_slice(&bytes).map_err(|_| KeysError::InvalidSecretKey)?;
         Ok(Self::from_secret_key(secret_key))
     }
 
     /// Create struct from SecretKey.
     fn from_secret_key(secret_key: SecretKey) -> Secp256k1Keys {
         let public_key = PublicKey::from_secret_key(&SECP256K1, &secret_key);
+
+        let serialized = public_key.serialize();
+        let public_key_bs58 = bs58::encode(bs58::Version::NodePublic, &serialized[..]);
+
         Secp256k1Keys {
             secret_key,
             public_key,
-            public_key_bs58: get_public_key_bs58(public_key),
+            public_key_bs58,
         }
     }
 
@@ -51,9 +54,16 @@ impl Secp256k1Keys {
     }
 }
 
-fn get_public_key_bs58(public_key: PublicKey) -> String {
-    let serialized = public_key.serialize();
-    bs58::encode(bs58::Version::NodePublic, &serialized[..])
+quick_error! {
+    #[derive(Debug)]
+    pub enum KeysError {
+        InvalidSecretKeyHex {
+            display("Invalid Secret Key in hex")
+        }
+        InvalidSecretKey {
+            display("Invalid Secret Key")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -69,7 +79,7 @@ mod tests {
 
         let keys = keys.unwrap();
         assert_eq!(
-            &keys.get_public_key_bs58(),
+            &*keys.get_public_key_bs58(),
             "n9KAa2zVWjPHgfzsE3iZ8HAbzJtPrnoh4H2M2HgE7dfqtvyEb1KJ"
         )
     }

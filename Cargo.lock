@@ -173,6 +173,7 @@ dependencies = [
  "bs58 0.0.0",
  "hex",
  "lazy_static",
+ "quick-error",
  "secp256k1",
  "sha2",
 ]
