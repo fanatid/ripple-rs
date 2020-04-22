@@ -3,14 +3,13 @@ use std::sync::Arc;
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, Bytes, BytesMut};
-use crypto::Secp256k1Keys;
+use crypto::sha2::{Digest, Sha512};
+use crypto::{secp256k1::Message, Secp256k1Keys};
 use openssl::ssl;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tls::TlsStream;
-
-use super::handshake;
 
 // /// Peer builder.
 // #[derive(Debug)]
@@ -60,25 +59,9 @@ impl Peer {
 
     /// Sned handshake message and run read messages loop if handshake successful.
     pub async fn connect(self: &Arc<Self>) -> Result<(), Box<dyn std::error::Error>> {
-        let ss = self.get_sslref();
+        self.handshake_send_request().await?;
 
-        let mut stream = self.stream.lock().await;
-        let content = format!(
-            "\
-            GET / HTTP/1.1\r\n\
-            Upgrade: XRPL/2.0\r\n\
-            Connection: Upgrade\r\n\
-            Connect-As: Peer\r\n\
-            Network-ID: 0\r\n\
-            Public-Key: {}\r\n\
-            Session-Signature: {}\r\n\
-            \r\n",
-            self.node_key.get_public_key_bs58(),
-            handshake::create_signature(ss, &self.node_key)
-        );
-        stream.write_all(content.as_bytes()).await?;
-
-        let (code, body) = handshake::read_response(&mut *stream).await?;
+        let (code, body) = self.handshake_read_response().await?;
         match code {
             101 => {}
             503 => panic!("More peers..."),
@@ -91,6 +74,55 @@ impl Peer {
         self.read_messages();
 
         Ok(())
+    }
+
+    async fn handshake_send_request(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut stream = self.stream.lock().await;
+        let content = format!(
+            "\
+            GET / HTTP/1.1\r\n\
+            Upgrade: XRPL/2.0\r\n\
+            Connection: Upgrade\r\n\
+            Connect-As: Peer\r\n\
+            Network-ID: 0\r\n\
+            Public-Key: {}\r\n\
+            Session-Signature: {}\r\n\
+            \r\n",
+            self.node_key.get_public_key_bs58(),
+            create_signature(self.get_sslref(), &self.node_key)
+        );
+        stream.write_all(content.as_bytes()).await?;
+
+        Ok(())
+    }
+
+    async fn handshake_read_response(&self) -> Result<(u16, BytesMut), Box<dyn std::error::Error>> {
+        let mut stream = self.stream.lock().await;
+        let mut buf = BytesMut::new();
+        let code = loop {
+            if stream.read_buf(&mut buf).await? == 0 {
+                println!(
+                    "Current buffer: {}",
+                    String::from_utf8_lossy(buf.bytes()).trim()
+                );
+                panic!("socket closed");
+            }
+
+            let mut headers = [httparse::EMPTY_HEADER; 32];
+            let mut resp = httparse::Response::new(&mut headers);
+            let status = resp.parse(&buf).expect("response parse success");
+            if status.is_complete() {
+                let code = resp.code.unwrap();
+                buf.advance(status.unwrap());
+                break code;
+            }
+        };
+
+        if code != 101 {
+            while stream.read_buf(&mut buf).await? > 0 {}
+        }
+
+        Ok((code, buf))
     }
 
     fn get_sslref(&self) -> &ssl::SslRef {
@@ -145,7 +177,8 @@ impl Peer {
 
                     let bytes = Bytes::copy_from_slice(&buf.bytes()[6..6 + payload_size]);
                     let msg = protocol::Message::decode(message_type as i32, bytes);
-                    println!("Received: {:?}", msg);
+                    let s = format!("{:?}", msg.unwrap());
+                    println!("Received: {:?}", s.split('(').next().unwrap());
                     buf.advance(6 + payload_size);
                 }
             }
@@ -155,4 +188,37 @@ impl Peer {
     // pub async fn send_message(&self, ?) -> Result<(), ?> {
     //     self.stream.lock()
     // }
+}
+
+fn get_shared_message(ssl: &ssl::SslRef) -> Message {
+    let mut buf = Vec::<u8>::with_capacity(1024);
+    buf.resize(buf.capacity(), 0);
+
+    let mut size = ssl.finished(&mut buf[..]);
+    if size > buf.len() {
+        buf.resize(size, 0);
+        size = ssl.finished(&mut buf[..]);
+    }
+    let cookie1 = Sha512::digest(&buf[..size]);
+
+    let mut size = ssl.peer_finished(&mut buf[..]);
+    if size > buf.len() {
+        buf.resize(size, 0);
+        size = ssl.peer_finished(&mut buf[..]);
+    }
+    let cookie2 = Sha512::digest(&buf[..size]);
+
+    let mix = cookie1
+        .iter()
+        .zip(cookie2.iter())
+        .map(|(a, b)| a ^ b)
+        .collect::<Vec<u8>>();
+    Message::from_slice(&Sha512::digest(&mix[..])[0..32]).expect("Invalid secp256k1::Message")
+}
+
+/// Create base64 encoded signature for handshake.
+pub(crate) fn create_signature(ssl: &ssl::SslRef, keys: &Secp256k1Keys) -> String {
+    let msg = get_shared_message(ssl);
+    let sig = keys.sign(&msg).serialize_der();
+    base64::encode(&sig)
 }
