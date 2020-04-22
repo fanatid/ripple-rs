@@ -13,9 +13,11 @@ futures = "0.3"
 httparse = "1.3.4"
 native-tls = "0.2.4"
 openssl = "0.10.29"
+quick-error = "1.2.3"
 tokio = { version = "0.2", features = ["io-util", "tcp", "sync", "dns"] }
 tokio-tls = "0.3.0"
 # local
+bs58 = { path = "../bs58" }
 crypto = { path = "../crypto" }
 log = { path = "../log" }
 protocol = { path = "../protocol" }

@@ -11,6 +11,9 @@
 
 //! Our bridge to ripple network.
 
+#[macro_use]
+extern crate quick_error;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -98,3 +101,16 @@ impl Network {
         addrs.into_iter().flatten().collect()
     }
 }
+
+// /// Ripple support [`Parallel Networks`](https://xrpl.org/parallel-networks.html),
+// /// this used for network identification.
+// #[derive(Debug, PartialEq, Eq)]
+// pub enum NetworkId {
+//     Main,
+//     Test,
+//     Other(u32),
+// }
+
+// impl NetworkId {
+//     pub fn from_
+// }

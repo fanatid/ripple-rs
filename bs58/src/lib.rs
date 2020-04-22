@@ -56,4 +56,25 @@ pub fn decode<I: AsRef<[u8]>>(version: Version, input: I) -> bs58::decode::Resul
         .with_prepared_alphabet(bs58::Alphabet::RIPPLE)
         .with_check(Some(version.value()))
         .into_vec()
+        .map(|mut vec| {
+            let _ = vec.remove(0);
+            vec
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_public() {
+        let data = "n9KAa2zVWjPHgfzsE3iZ8HAbzJtPrnoh4H2M2HgE7dfqtvyEb1KJ";
+
+        let bytes = decode(Version::NodePublic, &data);
+        assert!(bytes.is_ok());
+
+        let bytes = bytes.unwrap();
+        let value = encode(Version::NodePublic, &bytes);
+        assert_eq!(value, data);
+    }
 }

@@ -632,6 +632,7 @@ name = "network"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "bs58 0.0.0",
  "byteorder",
  "bytes",
  "crypto",
@@ -641,6 +642,7 @@ dependencies = [
  "native-tls",
  "openssl",
  "protocol",
+ "quick-error",
  "tokio",
  "tokio-tls",
 ]

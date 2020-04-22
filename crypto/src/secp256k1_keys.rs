@@ -39,6 +39,7 @@ impl Secp256k1Keys {
 
     /// Serialize PublicKey to base58.
     pub fn get_public_key_bs58(&self) -> String {
+        // TODO: add to struct as Option (cache)
         let serialized = self.public_key.serialize();
         bs58::encode(bs58::Version::NodePublic, &serialized[..])
     }
