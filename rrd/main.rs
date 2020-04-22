@@ -17,7 +17,7 @@ mod args;
 
 /// Start Rust Ripple node.
 fn main() {
-    log::init();
+    logj::init();
     let _args = args::get_args();
 
     let mut runtime = tokio::runtime::Builder::new()
@@ -30,7 +30,7 @@ fn main() {
 
     let network = Network::new();
     if let Err(error) = runtime.block_on(network.connect()) {
-        log::error!("{}", error);
+        logj::error!("{}", error);
         std::process::exit(1);
     }
 

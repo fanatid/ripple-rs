@@ -21,5 +21,5 @@ tokio-tls = "0.3.0"
 # local
 bs58_ripple = { path = "../bs58_ripple" }
 crypto = { path = "../crypto" }
-log = { path = "../log" }
+logj = { path = "../logj" }
 protocol = { path = "../protocol" }

@@ -57,15 +57,15 @@ impl Network {
                             println!("Received: {:?}", dbg.split('(').next().unwrap());
                         },
                         Err(peer::HandshakeError::Unavailable(ips)) => {
-                            log::info!("Unavailable peer: {}. Provide peers: {:?}", addr, ips);
+                            logj::info!("Unavailable peer: {}. Provide peers: {:?}", addr, ips);
                             // addrs.append(&mut ips);
                         }
                         Err(error) => {
-                            log::error!("Failed handshake with peer {}: {}", addr, error);
+                            logj::error!("Failed handshake with peer {}: {}", addr, error);
                         }
                     },
                     Err(error) => {
-                        log::error!("Failed connect to peer {}: {}", addr, error);
+                        logj::error!("Failed connect to peer {}: {}", addr, error);
                     }
                 };
             }
@@ -95,7 +95,7 @@ impl Network {
             match lookup_host(node).await {
                 Ok(addrs) => addrs.collect(),
                 Err(error) => {
-                    log::error!("Failed resolve bootstrap node {}: {}", node, error);
+                    logj::error!("Failed resolve bootstrap node {}: {}", node, error);
                     vec![]
                 }
             }

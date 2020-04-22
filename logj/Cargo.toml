@@ -1,5 +1,5 @@
 [package]
-name = "log"
+name = "logj"
 version = "0.0.0"
 authors = ["Kirill Fomichev <fanatid@ya.ru>"]
 edition = "2018"
