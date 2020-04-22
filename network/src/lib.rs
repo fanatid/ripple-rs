@@ -56,6 +56,10 @@ impl Network {
                             let dbg = format!("{:?}", msg);
                             println!("Received: {:?}", dbg.split('(').next().unwrap());
                         },
+                        Err(peer::HandshakeError::Unavailable(ips)) => {
+                            log::info!("Unavailable peer: {}. Provide peers: {:?}", addr, ips);
+                            // addrs.append(&mut ips);
+                        }
                         Err(error) => {
                             log::error!("Failed handshake with peer {}: {}", addr, error);
                         }

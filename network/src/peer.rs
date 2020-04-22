@@ -184,7 +184,30 @@ impl Peer {
                     }
                 }
 
-                // chunked-encoding... fuck. (use httparse)
+                // chunked-encoding...
+                let mut buf1 = buf.clone();
+                let mut buf2 = BytesMut::with_capacity(buf.len());
+                while !buf1.is_empty() {
+                    let status = match httparse::parse_chunk_size(&buf1) {
+                        Ok(status) => status,
+                        Err(_) => return Err(HandshakeError::InvalidChunkedBody(buf)),
+                    };
+
+                    if status.is_partial() {
+                        return Err(HandshakeError::InvalidChunkedBody(buf));
+                    }
+
+                    let (start, size) = status.unwrap();
+                    if size == 0 {
+                        break;
+                    }
+
+                    let end = start + size as usize;
+                    buf2.extend_from_slice(&buf1.bytes()[start..end]);
+                    buf1.advance(end);
+                }
+
+                buf = buf2;
             }
 
             buf.advance(status.unwrap());
@@ -199,12 +222,12 @@ impl Peer {
             400 => Err(HandshakeError::BadRequest(
                 String::from_utf8_lossy(&buf).trim().to_string(),
             )),
-            503 => {
-                println!("{:?}", &buf);
-                panic!("more peers")
-                // Err(HandshakeError::Unavailable(?))
-                // UnavailableBadBody
-            }
+            503 => match serde_json::from_slice::<PeerUnavailableBody>(&buf) {
+                Ok(body) => Err(HandshakeError::Unavailable(body.ips)),
+                Err(_) => Err(HandshakeError::UnavailableBadBody(
+                    String::from_utf8_lossy(&buf).to_string(),
+                )),
+            },
             _ => Err(HandshakeError::UnexpectedHttpStatus(code)),
         }
     }
@@ -353,6 +376,9 @@ quick_error! {
         SignatureVerificationFailed {
             display("Signature verification failed")
         }
+        InvalidChunkedBody(body: BytesMut) {
+            display("Invalid chunked body: {:?}", &body.bytes())
+        }
         BadRequest(reason: String) {
             display("Bad request: {}", reason)
         }
@@ -360,7 +386,7 @@ quick_error! {
             display("Unavailable, give peers: {:?}", ips)
         }
         UnavailableBadBody(body: String) {
-            display("Unavailable, bad body: {}", body)
+            display("Unavailable, can't parse body: {}", body)
         }
         UnexpectedHttpStatus(status: u16) {
             display("Unexpected HTTP status: {}", status)
