@@ -1,14 +1,13 @@
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, Bytes, BytesMut};
+use crypto::secp256k1::{Message, PublicKey, Signature};
 use crypto::sha2::{Digest, Sha512};
-use crypto::{
-    secp256k1::{Message, PublicKey, Signature},
-    Secp256k1Keys,
-};
-use openssl::ssl::{SslRef, SslStream};
+use crypto::Secp256k1Keys;
+use openssl::ssl::SslStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Error as IoError};
 use tokio::net::TcpStream;
 use tokio_tls::TlsStream;
@@ -33,7 +32,6 @@ pub struct Peer {
     // network_id: NetworkId,
     stream: TlsStream<TcpStream>,
     read_buf: BytesMut,
-    peer_user_agent: Option<String>,
 }
 
 impl Peer {
@@ -64,7 +62,6 @@ impl Peer {
             // network_id: NetworkId::Main,
             stream,
             read_buf: BytesMut::with_capacity(128 * 1024),
-            peer_user_agent: None,
         })
     }
 
@@ -113,7 +110,7 @@ impl Peer {
             Session-Signature: {}\r\n\
             \r\n",
             self.node_key.get_public_key_bs58(),
-            create_signature(self.get_sslref(), &self.node_key)
+            self.handshake_create_signature()?
         );
         self.stream.write_all(content.as_bytes()).await?;
 
@@ -153,7 +150,8 @@ impl Peer {
                     };
                 }
 
-                self.peer_user_agent = Some(get_header!("Server").1.to_string());
+                // self.peer_user_agent = Some(get_header!("Server").1.to_string());
+                let _ = get_header!("Server");
 
                 if get_header!("Connection").1 != "Upgrade" {
                     let reason = r#"expect "Upgrade""#.to_owned();
@@ -180,21 +178,9 @@ impl Peer {
 
                 // Network-Time 640854679
 
-                let pk_header = get_header!("Public-Key").1;
-                let pk_bytes = bs58::decode(bs58::Version::NodePublic, &*pk_header)
-                    .map_err(|_| HandshakeError::InvalidPublicKey(pk_header.to_string()))?;
-                let pk = PublicKey::from_slice(&pk_bytes)
-                    .map_err(|_| HandshakeError::InvalidPublicKey(pk_header.to_string()))?;
-
-                let sig_header = get_header!("Session-Signature").1;
-                let sig_bytes = base64::decode(&*sig_header)
-                    .map_err(|_| HandshakeError::InvalidSignature(sig_header.to_string()))?;
-                let sig = Signature::from_der(&sig_bytes)
-                    .map_err(|_| HandshakeError::InvalidSignature(sig_header.to_string()))?;
-
-                if !verify_signature(self.get_sslref(), &sig, &pk) {
-                    return Err(HandshakeError::SignatureVerificationFailed);
-                }
+                let public_key = get_header!("Public-Key").1;
+                let sig = get_header!("Session-Signature").1;
+                let _ = self.handshake_verify_signature(sig, public_key)?;
 
                 // Crawl public
                 // Closed-Ledger W8hR7+Q1acWpc1fcKXA6J0Qa9pmJ4dxjvKkacx/6GC8=
@@ -219,13 +205,71 @@ impl Peer {
         Ok((code, buf))
     }
 
-    fn get_sslref(&self) -> &SslRef {
-        unsafe {
+    /// Create message for create/verify signature.
+    fn handshake_mkshared(&self) -> Result<Message, HandshakeError> {
+        let ssl = unsafe {
             // TODO: use openssl directly, without tokio_tls and native-tls
             // https://docs.rs/tokio-tls/0.3.0/src/tokio_tls/lib.rs.html#43-47
             // AllowStd have size 64
             #[allow(trivial_casts)]
             (*(&self.stream as *const _ as *const SslStream<[u8; 64]>)).ssl()
+        };
+
+        let mut buf = Vec::<u8>::with_capacity(1024);
+        buf.resize(buf.capacity(), 0);
+
+        let mut size = ssl.finished(&mut buf[..]);
+        if size > buf.len() {
+            buf.resize(size, 0);
+            size = ssl.finished(&mut buf[..]);
+        }
+        let cookie1 = Sha512::digest(&buf[..size]);
+
+        let mut size = ssl.peer_finished(&mut buf[..]);
+        if size > buf.len() {
+            buf.resize(size, 0);
+            size = ssl.peer_finished(&mut buf[..]);
+        }
+        let cookie2 = Sha512::digest(&buf[..size]);
+
+        let mix = cookie1
+            .iter()
+            .zip(cookie2.iter())
+            .map(|(a, b)| a ^ b)
+            .collect::<Vec<u8>>();
+        let hash = Sha512::digest(&mix[..]);
+
+        Message::from_slice(&hash[0..32]).map_err(|_| HandshakeError::InvalidMessage)
+    }
+
+    /// Create base64 encoded signature for handshake with node keys ([`Secp256k1Keys`][crypto::Secp256k1Keys]).
+    fn handshake_create_signature(&self) -> Result<String, HandshakeError> {
+        let msg = self.handshake_mkshared()?;
+        let sig = self.node_key.sign(&msg).serialize_der();
+        Ok(base64::encode(&sig))
+    }
+
+    /// Verify base64 encoded signature for handshake with base58 encoded Public Key.
+    /// Return [`PublicKey`][crypto::secp256k1::PublicKey] on success.
+    fn handshake_verify_signature(
+        &self,
+        sig_header: Cow<'_, str>,
+        pk_header: Cow<'_, str>,
+    ) -> Result<PublicKey, HandshakeError> {
+        let pk_bytes = bs58::decode(bs58::Version::NodePublic, &*pk_header)
+            .map_err(|_| HandshakeError::InvalidPublicKey(pk_header.to_string()))?;
+        let pk = PublicKey::from_slice(&pk_bytes)
+            .map_err(|_| HandshakeError::InvalidPublicKey(pk_header.to_string()))?;
+
+        let sig_bytes = base64::decode(&*sig_header)
+            .map_err(|_| HandshakeError::InvalidSignature(sig_header.to_string()))?;
+        let sig = Signature::from_der(&sig_bytes)
+            .map_err(|_| HandshakeError::InvalidSignature(sig_header.to_string()))?;
+
+        let msg = self.handshake_mkshared()?;
+        match crypto::SECP256K1.verify(&msg, &sig, &pk) {
+            Ok(_) => Ok(pk),
+            Err(_) => Err(HandshakeError::SignatureVerificationFailed),
         }
     }
 
@@ -277,45 +321,6 @@ impl Peer {
     // }
 }
 
-fn get_shared_message(ssl: &SslRef) -> Message {
-    let mut buf = Vec::<u8>::with_capacity(1024);
-    buf.resize(buf.capacity(), 0);
-
-    let mut size = ssl.finished(&mut buf[..]);
-    if size > buf.len() {
-        buf.resize(size, 0);
-        size = ssl.finished(&mut buf[..]);
-    }
-    let cookie1 = Sha512::digest(&buf[..size]);
-
-    let mut size = ssl.peer_finished(&mut buf[..]);
-    if size > buf.len() {
-        buf.resize(size, 0);
-        size = ssl.peer_finished(&mut buf[..]);
-    }
-    let cookie2 = Sha512::digest(&buf[..size]);
-
-    let mix = cookie1
-        .iter()
-        .zip(cookie2.iter())
-        .map(|(a, b)| a ^ b)
-        .collect::<Vec<u8>>();
-    Message::from_slice(&Sha512::digest(&mix[..])[0..32]).expect("Invalid secp256k1::Message")
-}
-
-/// Create base64 encoded signature for handshake with node keys ([`Secp256k1Keys`][crypto::Secp256k1Keys]).
-fn create_signature(ssl: &SslRef, keys: &Secp256k1Keys) -> String {
-    let msg = get_shared_message(ssl);
-    let sig = keys.sign(&msg).serialize_der();
-    base64::encode(&sig)
-}
-
-/// Verify base64 encoded signature for handshake with base58 encoded Public Key.
-fn verify_signature(ssl: &SslRef, sig: &Signature, pk: &PublicKey) -> bool {
-    let msg = get_shared_message(ssl);
-    crypto::SECP256K1.verify(&msg, sig, pk).is_ok()
-}
-
 quick_error! {
     /// Possible errors during handshake process.
     #[derive(Debug)]
@@ -331,6 +336,9 @@ quick_error! {
         }
         InvalidHeader(name: &'static str, reason: String) {
             display(r#"Invalid header "{}": {}"#, name, reason)
+        }
+        InvalidMessage {
+            display("Invalid message generated")
         }
         InvalidPublicKey(public_key: String) {
             display(r#"Invalid Public Key: "{}""#, public_key)
