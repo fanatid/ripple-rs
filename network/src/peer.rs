@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use byteorder::{BigEndian, ByteOrder};
@@ -8,6 +9,7 @@ use crypto::secp256k1::{Message, PublicKey, Signature};
 use crypto::sha2::{Digest, Sha512};
 use crypto::Secp256k1Keys;
 use openssl::ssl::SslStream;
+use serde::{de, Deserialize, Deserializer, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Error as IoError};
 use tokio::net::TcpStream;
 use tokio_tls::TlsStream;
@@ -65,25 +67,14 @@ impl Peer {
         })
     }
 
-    /// Sned handshake message and run read messages loop if handshake successful.
-    pub async fn connect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Outgoing handshake process.
+    pub async fn connect(&mut self) -> Result<(), HandshakeError> {
         self.handshake_send_request().await?;
-
-        let (code, body) = self.handshake_read_response().await?;
-        match code {
-            101 => {}
-            503 => panic!("More peers..."),
-            _ => {
-                panic!("Code: {}, body: {}", code, String::from_utf8_lossy(&body));
-            }
-        };
-
-        // TODO: save `body` as extra readed bytes
-
-        Ok(())
+        self.handshake_read_response().await
     }
 
-    async fn handshake_send_request(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Send handshake request.
+    async fn handshake_send_request(&mut self) -> Result<(), HandshakeError> {
         // User-Agent: {}
         // Connection: Upgrade
         // Upgrade: XRPL/2.0
@@ -108,17 +99,22 @@ impl Peer {
             Network-ID: 0\r\n\
             Public-Key: {}\r\n\
             Session-Signature: {}\r\n\
+            Crawl: private\r\n\
             \r\n",
             self.node_key.get_public_key_bs58(),
             self.handshake_create_signature()?
         );
-        self.stream.write_all(content.as_bytes()).await?;
 
-        Ok(())
+        self.stream
+            .write_all(content.as_bytes())
+            .await
+            .map_err(HandshakeError::Io)
     }
 
-    async fn handshake_read_response(&mut self) -> Result<(u16, BytesMut), HandshakeError> {
+    /// Read peer handshake response for our handshake request.
+    async fn handshake_read_response(&mut self) -> Result<(), HandshakeError> {
         let mut buf = BytesMut::new();
+
         let code = loop {
             let fut = self.stream.read_buf(&mut buf);
             if fut.await.map_err(HandshakeError::Io)? == 0 {
@@ -141,29 +137,23 @@ impl Peer {
                         .map(|h| (h.name, String::from_utf8_lossy(h.value)))
                 };
 
-                macro_rules! get_header {
-                    ($name:expr) => {
-                        match find_header($name) {
-                            Some(header) => header,
-                            None => return Err(HandshakeError::MissingHeader($name)),
-                        }
-                    };
-                }
+                let get_header =
+                    |name| find_header(name).ok_or_else(|| HandshakeError::MissingHeader(name));
 
                 // self.peer_user_agent = Some(get_header!("Server").1.to_string());
-                let _ = get_header!("Server");
+                let _ = get_header("Server")?;
 
-                if get_header!("Connection").1 != "Upgrade" {
+                if get_header("Connection")?.1 != "Upgrade" {
                     let reason = r#"expect "Upgrade""#.to_owned();
                     return Err(HandshakeError::InvalidHeader("Connection", reason));
                 }
 
-                if get_header!("Upgrade").1 != "XRPL/2.0" {
+                if get_header("Upgrade")?.1 != "XRPL/2.0" {
                     let reason = r#"Only "XRPL/2.0" supported right now"#.to_owned();
                     return Err(HandshakeError::InvalidHeader("Upgrade", reason));
                 }
 
-                if !get_header!("Connect-As").1.eq_ignore_ascii_case("peer") {
+                if !get_header("Connect-As")?.1.eq_ignore_ascii_case("peer") {
                     let reason = r#"Only "Peer" supported right now"#.to_owned();
                     return Err(HandshakeError::InvalidHeader("Connect-As", reason));
                 }
@@ -178,31 +168,44 @@ impl Peer {
 
                 // Network-Time 640854679
 
-                let public_key = get_header!("Public-Key").1;
-                let sig = get_header!("Session-Signature").1;
+                let public_key = get_header("Public-Key")?.1;
+                let sig = get_header("Session-Signature")?.1;
+                // self.peer_public_key = Some(self.handshake_verify_signature(sig, public_key)?);
                 let _ = self.handshake_verify_signature(sig, public_key)?;
 
-                // Crawl public
-                // Closed-Ledger W8hR7+Q1acWpc1fcKXA6J0Qa9pmJ4dxjvKkacx/6GC8=
-                // Previous-Ledger b2+kJlTVmP0zXTirE570dWaTSFDfnTM/fOftA2UoCxM=
+            // Crawl public
+            // Closed-Ledger W8hR7+Q1acWpc1fcKXA6J0Qa9pmJ4dxjvKkacx/6GC8=
+            // Previous-Ledger b2+kJlTVmP0zXTirE570dWaTSFDfnTM/fOftA2UoCxM=
+            } else {
+                loop {
+                    let fut = self.stream.read_buf(&mut buf);
+                    if fut.await.map_err(HandshakeError::Io)? == 0 {
+                        break;
+                    }
+                }
+
+                // chunked-encoding... fuck. (use httparse)
             }
 
             buf.advance(status.unwrap());
             break code;
         };
 
-        if code != 101 {
-            loop {
-                let fut = self.stream.read_buf(&mut buf);
-                if fut.await.map_err(HandshakeError::Io)? == 0 {
-                    break;
-                }
+        match code {
+            101 => {
+                // self.read_buf? = Some(buf);
+                Ok(())
             }
-
-            // return Err, 503, 400, etc
+            400 => Err(HandshakeError::BadRequest(
+                String::from_utf8_lossy(&buf).trim().to_string(),
+            )),
+            503 => {
+                panic!("more peers")
+                // Err(HandshakeError::Unavailable(?))
+                // UnavailableBadBody
+            }
+            _ => Err(HandshakeError::UnexpectedHttpStatus(code)),
         }
-
-        Ok((code, buf))
     }
 
     /// Create message for create/verify signature.
@@ -349,5 +352,69 @@ quick_error! {
         SignatureVerificationFailed {
             display("Signature verification failed")
         }
+        BadRequest(reason: String) {
+            display("Bad request: {}", reason)
+        }
+        Unavailable(ips: Vec<SocketAddr>) {
+            display("Unavailable, give peers: {:?}", ips)
+        }
+        UnavailableBadBody(body: String) {
+            display("Unavailable, bad body: {}", body)
+        }
+        UnexpectedHttpStatus(status: u16) {
+            display("Unexpected HTTP status: {}", status)
+        }
+    }
+}
+
+/// If peer response with 503 (unavailable) on handshake, in body we receive
+#[derive(Debug, Deserialize, Serialize)]
+struct PeerUnavailableBody {
+    #[serde(
+        rename = "peer-ips",
+        deserialize_with = "PeerUnavailableBody::ips_deserialize"
+    )]
+    pub ips: Vec<SocketAddr>,
+}
+
+impl PeerUnavailableBody {
+    #[allow(single_use_lifetimes)]
+    fn ips_deserialize<'de, D>(deserializer: D) -> Result<Vec<SocketAddr>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut raw: Vec<&str> = Deserialize::deserialize(deserializer)?;
+
+        let mut addrs = Vec::with_capacity(raw.len());
+        for data in raw.iter_mut() {
+            match SocketAddr::from_str(data) {
+                Ok(addr) => addrs.push(addr),
+                Err(error) => {
+                    return Err(de::Error::invalid_value(
+                        de::Unexpected::Other(&format!("{}", error)),
+                        &"an Array of SocketAddr",
+                    ))
+                }
+            }
+        }
+        Ok(addrs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_ips_decode_encode() {
+        let data = r#"{"peer-ips":["54.68.219.39:51235","54.187.191.179:51235","107.150.55.21:6561","54.186.230.77:51235","54.187.110.243:51235","85.127.34.221:51235","50.43.33.236:51235","54.187.138.75:51235"]}"#;
+
+        let body = serde_json::from_str::<PeerUnavailableBody>(data);
+        assert!(body.is_ok());
+        let body = body.unwrap();
+
+        let value = serde_json::to_string(&body);
+        assert!(value.is_ok());
+        assert_eq!(value.unwrap(), data);
     }
 }
