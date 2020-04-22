@@ -134,26 +134,26 @@ impl Peer {
                     resp.headers
                         .iter()
                         .find(|h| h.name.eq_ignore_ascii_case(name))
-                        .map(|h| (h.name, String::from_utf8_lossy(h.value)))
+                        .map(|h| String::from_utf8_lossy(h.value))
                 };
 
                 let get_header =
                     |name| find_header(name).ok_or_else(|| HandshakeError::MissingHeader(name));
 
-                // self.peer_user_agent = Some(get_header!("Server").1.to_string());
+                // self.peer_user_agent = Some(get_header!("Server").to_string());
                 let _ = get_header("Server")?;
 
-                if get_header("Connection")?.1 != "Upgrade" {
+                if get_header("Connection")? != "Upgrade" {
                     let reason = r#"expect "Upgrade""#.to_owned();
                     return Err(HandshakeError::InvalidHeader("Connection", reason));
                 }
 
-                if get_header("Upgrade")?.1 != "XRPL/2.0" {
+                if get_header("Upgrade")? != "XRPL/2.0" {
                     let reason = r#"Only "XRPL/2.0" supported right now"#.to_owned();
                     return Err(HandshakeError::InvalidHeader("Upgrade", reason));
                 }
 
-                if !get_header("Connect-As")?.1.eq_ignore_ascii_case("peer") {
+                if !get_header("Connect-As")?.eq_ignore_ascii_case("peer") {
                     let reason = r#"Only "Peer" supported right now"#.to_owned();
                     return Err(HandshakeError::InvalidHeader("Connect-As", reason));
                 }
@@ -168,8 +168,8 @@ impl Peer {
 
                 // Network-Time 640854679
 
-                let public_key = get_header("Public-Key")?.1;
-                let sig = get_header("Session-Signature")?.1;
+                let public_key = get_header("Public-Key")?;
+                let sig = get_header("Session-Signature")?;
                 // self.peer_public_key = Some(self.handshake_verify_signature(sig, public_key)?);
                 let _ = self.handshake_verify_signature(sig, public_key)?;
 
@@ -200,6 +200,7 @@ impl Peer {
                 String::from_utf8_lossy(&buf).trim().to_string(),
             )),
             503 => {
+                println!("{:?}", &buf);
                 panic!("more peers")
                 // Err(HandshakeError::Unavailable(?))
                 // UnavailableBadBody
