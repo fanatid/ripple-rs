@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::convert::Infallible;
 
 use secp256k1::rand::rngs::OsRng;
@@ -10,6 +11,7 @@ use super::SECP256K1;
 pub struct Secp256k1Keys {
     secret_key: SecretKey,
     public_key: PublicKey,
+    public_key_bs58: String,
 }
 
 impl Secp256k1Keys {
@@ -34,20 +36,24 @@ impl Secp256k1Keys {
         Secp256k1Keys {
             secret_key,
             public_key,
+            public_key_bs58: get_public_key_bs58(public_key),
         }
     }
 
     /// Serialize PublicKey to base58.
-    pub fn get_public_key_bs58(&self) -> String {
-        // TODO: add to struct as Option (cache)
-        let serialized = self.public_key.serialize();
-        bs58::encode(bs58::Version::NodePublic, &serialized[..])
+    pub fn get_public_key_bs58(&self) -> Cow<'_, String> {
+        Cow::Borrowed(&self.public_key_bs58)
     }
 
     /// Sign [`secp256k1::Message`][secp256k1::Message].
     pub fn sign(&self, msg: &Message) -> Signature {
         SECP256K1.sign(msg, &self.secret_key)
     }
+}
+
+fn get_public_key_bs58(public_key: PublicKey) -> String {
+    let serialized = public_key.serialize();
+    bs58::encode(bs58::Version::NodePublic, &serialized[..])
 }
 
 #[cfg(test)]
