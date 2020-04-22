@@ -34,7 +34,8 @@ impl Secp256k1Keys {
         let public_key = PublicKey::from_secret_key(&SECP256K1, &secret_key);
 
         let serialized = public_key.serialize();
-        let public_key_bs58 = bs58::encode(bs58::Version::NodePublic, &serialized[..]);
+        let public_key_bs58 =
+            bs58_ripple::encode(bs58_ripple::Version::NodePublic, &serialized[..]);
 
         Secp256k1Keys {
             secret_key,

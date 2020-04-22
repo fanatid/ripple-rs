@@ -47,6 +47,7 @@ impl Peer {
     pub async fn from_addr(
         addr: SocketAddr,
         node_key: Arc<Secp256k1Keys>,
+        // ) -> Result<Peer, ConnectError> {
     ) -> Result<Peer, Box<dyn std::error::Error>> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
@@ -283,7 +284,7 @@ impl Peer {
         sig_header: Cow<'_, str>,
         pk_header: Cow<'_, str>,
     ) -> Result<PublicKey, HandshakeError> {
-        let pk_bytes = bs58::decode(bs58::Version::NodePublic, &*pk_header)
+        let pk_bytes = bs58_ripple::decode(bs58_ripple::Version::NodePublic, &*pk_header)
             .map_err(|_| HandshakeError::InvalidPublicKey(pk_header.to_string()))?;
         let pk = PublicKey::from_slice(&pk_bytes)
             .map_err(|_| HandshakeError::InvalidPublicKey(pk_header.to_string()))?;

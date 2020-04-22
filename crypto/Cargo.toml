@@ -6,7 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies]
-bs58 = { path = "../bs58" }
+bs58_ripple = { path = "../bs58_ripple" }
 hex = "0.4.2"
 lazy_static = "1.4.0"
 quick-error = "1.2.3"

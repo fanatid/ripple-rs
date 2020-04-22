@@ -19,7 +19,7 @@ serde_json = { version = "1.0" }
 tokio = { version = "0.2", features = ["io-util", "tcp", "sync", "dns"] }
 tokio-tls = "0.3.0"
 # local
-bs58 = { path = "../bs58" }
+bs58_ripple = { path = "../bs58_ripple" }
 crypto = { path = "../crypto" }
 log = { path = "../log" }
 protocol = { path = "../protocol" }

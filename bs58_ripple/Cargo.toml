@@ -1,5 +1,5 @@
 [package]
-name = "bs58"
+name = "bs58_ripple"
 version = "0.0.0"
 authors = ["Kirill Fomichev <fanatid@ya.ru>"]
 edition = "2018"

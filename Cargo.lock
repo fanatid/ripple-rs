@@ -82,18 +82,18 @@ dependencies = [
 
 [[package]]
 name = "bs58"
-version = "0.0.0"
-dependencies = [
- "bs58 0.3.1",
-]
-
-[[package]]
-name = "bs58"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "476e9cd489f9e121e02ffa6014a8ef220ecb15c05ed23fc34cca13925dc283fb"
 dependencies = [
  "sha2",
+]
+
+[[package]]
+name = "bs58_ripple"
+version = "0.0.0"
+dependencies = [
+ "bs58",
 ]
 
 [[package]]
@@ -170,7 +170,7 @@ checksum = "b3a71ab494c0b5b860bdc8407ae08978052417070c2ced38573a9157ad75b8ac"
 name = "crypto"
 version = "0.0.0"
 dependencies = [
- "bs58 0.0.0",
+ "bs58_ripple",
  "hex",
  "lazy_static",
  "quick-error",
@@ -633,7 +633,7 @@ name = "network"
 version = "0.0.0"
 dependencies = [
  "base64",
- "bs58 0.0.0",
+ "bs58_ripple",
  "byteorder",
  "bytes",
  "crypto",
