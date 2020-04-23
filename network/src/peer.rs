@@ -76,21 +76,7 @@ impl Peer {
 
     /// Send handshake request.
     async fn handshake_send_request(&mut self) -> Result<(), HandshakeError> {
-        // User-Agent: {}
-        // Connection: Upgrade
-        // Upgrade: XRPL/2.0
-        // Connect-As: peer
-        // Remote-IP: {}
-        // Local-IP: {}
-        // Network-ID: {}
-        // Network-Time: {}
-        // Public-Key: {}
-        // Session-Signature: {}
-        // Crawl: {}
-        // Closed-Ledger: {}
-        // Previous-Ledger: {}
-
-        let content = format!(
+        let mut content = format!(
             "\
             GET / HTTP/1.1\r\n\
             User-Agent: rrd-0.0.0\r\n\
@@ -101,13 +87,26 @@ impl Peer {
             Network-Time: {}\r\n\
             Public-Key: {}\r\n\
             Session-Signature: {}\r\n\
-            Crawl: private\r\n\
-            \r\n",
+            Crawl: private\r\n",
             self.network_id.value(),
             network_time(),
             self.node_key.get_public_key_bs58(),
             self.handshake_create_signature()?
         );
+
+        let stream = self.stream.get_ref();
+        let remote = stream.peer_addr().map_err(HandshakeError::Io)?.ip();
+        if remote.is_global() {
+            content += &format!("Remote-IP: {}\r\n", remote);
+        }
+
+        // specified global ip from config
+        // Local-IP: {}
+
+        // Closed-Ledger: {}
+        // Previous-Ledger: {}
+
+        content += "\r\n";
 
         self.stream
             .write_all(content.as_bytes())
