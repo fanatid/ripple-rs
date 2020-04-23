@@ -47,18 +47,18 @@ impl Peer {
     pub async fn from_addr(
         addr: SocketAddr,
         node_key: Arc<Secp256k1Keys>,
-        // ) -> Result<Peer, ConnectError> {
-    ) -> Result<Peer, Box<dyn std::error::Error>> {
-        let stream = TcpStream::connect(addr).await?;
-        stream.set_nodelay(true)?;
+    ) -> Result<Peer, ConnectError> {
+        let stream = TcpStream::connect(addr).await.map_err(ConnectError::Io)?;
+        stream.set_nodelay(true).map_err(ConnectError::Io)?;
 
         let cx = native_tls::TlsConnector::builder()
             .use_sni(false)
             .danger_accept_invalid_hostnames(true)
             .danger_accept_invalid_certs(true)
-            .build()?;
+            .build()
+            .map_err(ConnectError::Tls)?;
         let cx = tokio_tls::TlsConnector::from(cx);
-        let stream = cx.connect("", stream).await?;
+        let stream = cx.connect("", stream).await.map_err(ConnectError::Tls)?;
 
         Ok(Peer {
             node_key,
@@ -304,6 +304,7 @@ impl Peer {
     /// Read message from peer.
     pub async fn read_message(&mut self) -> Result<protocol::Message, Box<dyn std::error::Error>> {
         // TODO: fiture out buffer required for most of messages.
+        // TODO: run in spawn + send through mpsc to network?
         loop {
             match self.stream.read_buf(&mut self.read_buf).await {
                 Ok(size) => {
@@ -347,6 +348,19 @@ impl Peer {
     // pub async fn send_message(&self, ?) -> Result<(), ?> {
     //     self.stream.lock()
     // }
+}
+
+quick_error! {
+    /// Possible errors on connecting to peer.
+    #[derive(Debug)]
+    pub enum ConnectError {
+        Io(error: IoError) {
+            display("{}", error)
+        }
+        Tls(error: native_tls::Error) {
+            display("{}", error)
+        }
+    }
 }
 
 quick_error! {
