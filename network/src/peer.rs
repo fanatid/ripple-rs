@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, Error as IoError};
 use tokio::net::TcpStream;
 use tokio_tls::TlsStream;
 
-// use super::NetworkId;
+use super::NetworkId;
 
 // /// Peer builder.
 // #[derive(Debug)]
@@ -31,7 +31,7 @@ use tokio_tls::TlsStream;
 pub struct Peer {
     // node_key as ref?
     node_key: Arc<Secp256k1Keys>,
-    // network_id: NetworkId,
+    network_id: NetworkId,
     stream: TlsStream<TcpStream>,
     read_buf: BytesMut,
 }
@@ -62,7 +62,7 @@ impl Peer {
 
         Ok(Peer {
             node_key,
-            // network_id: NetworkId::Main,
+            network_id: NetworkId::Main,
             stream,
             read_buf: BytesMut::with_capacity(128 * 1024),
         })
@@ -97,11 +97,12 @@ impl Peer {
             Connection: Upgrade\r\n\
             Upgrade: XRPL/2.0\r\n\
             Connect-As: Peer\r\n\
-            Network-ID: 0\r\n\
+            Network-ID: {}\r\n\
             Public-Key: {}\r\n\
             Session-Signature: {}\r\n\
             Crawl: private\r\n\
             \r\n",
+            self.network_id.value(),
             self.node_key.get_public_key_bs58(),
             self.handshake_create_signature()?
         );
@@ -162,10 +163,18 @@ impl Peer {
                 // Remote-IP: {}
                 // Local-IP: {}
 
-                // let network_id = match find_header("Network-Id") {
-                //     Some((_, value)) => {}
-                //     None => NetworkId::Main,
-                // }
+                let network_id = match find_header("Network-Id") {
+                    Some(value) => value.parse().map_err(|e: std::num::ParseIntError| {
+                        HandshakeError::InvalidNetworkId(e.to_string())
+                    })?,
+                    None => NetworkId::Main,
+                };
+                if network_id != self.network_id {
+                    let expected = self.network_id.value();
+                    let received = network_id.value();
+                    let reason = format!("expected {}, received {}", expected, received);
+                    return Err(HandshakeError::InvalidNetworkId(reason));
+                }
 
                 // Network-Time 640854679
 
@@ -378,6 +387,9 @@ quick_error! {
         }
         InvalidHeader(name: &'static str, reason: String) {
             display(r#"Invalid header "{}": {}"#, name, reason)
+        }
+        InvalidNetworkId(reason: String) {
+            display("Invalid network id: {}", reason)
         }
         InvalidMessage {
             display("Invalid message generated")
