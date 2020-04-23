@@ -98,11 +98,13 @@ impl Peer {
             Upgrade: XRPL/2.0\r\n\
             Connect-As: Peer\r\n\
             Network-ID: {}\r\n\
+            Network-Time: {}\r\n\
             Public-Key: {}\r\n\
             Session-Signature: {}\r\n\
             Crawl: private\r\n\
             \r\n",
             self.network_id.value(),
+            network_time(),
             self.node_key.get_public_key_bs58(),
             self.handshake_create_signature()?
         );
@@ -164,9 +166,9 @@ impl Peer {
                 // Local-IP: {}
 
                 let network_id = match find_header("Network-Id") {
-                    Some(value) => value.parse().map_err(|e: std::num::ParseIntError| {
-                        HandshakeError::InvalidNetworkId(e.to_string())
-                    })?,
+                    Some(value) => value
+                        .parse::<NetworkId>()
+                        .map_err(|e| HandshakeError::InvalidNetworkId(e.to_string()))?,
                     None => NetworkId::Main,
                 };
                 if network_id != self.network_id {
@@ -176,7 +178,19 @@ impl Peer {
                     return Err(HandshakeError::InvalidNetworkId(reason));
                 }
 
-                // Network-Time 640854679
+                if let Some(value) = find_header("Network-Time") {
+                    let peer_time = value
+                        .parse::<u64>()
+                        .map_err(|e| HandshakeError::InvalidNetworkTime(e.to_string()))?;
+                    let local_time = network_time();
+
+                    use std::cmp::{max, min};
+                    let diff = max(peer_time, local_time) - min(peer_time, local_time);
+                    if diff > 20 {
+                        let reason = "Peer clock is too far off".to_owned();
+                        return Err(HandshakeError::InvalidNetworkTime(reason));
+                    }
+                }
 
                 let public_key = get_header("Public-Key")?;
                 let sig = get_header("Session-Signature")?;
@@ -391,6 +405,9 @@ quick_error! {
         InvalidNetworkId(reason: String) {
             display("Invalid network id: {}", reason)
         }
+        InvalidNetworkTime(reason: String) {
+            display("Invalid network time: {}", reason)
+        }
         InvalidMessage {
             display("Invalid message generated")
         }
@@ -453,6 +470,18 @@ impl PeerUnavailableBody {
         }
         Ok(addrs)
     }
+}
+
+/// Get Ripple time ([docs](https://xrpl.org/basic-data-types.html#specifying-time)).
+fn network_time() -> u64 {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("You came from the past")
+        .checked_sub(Duration::from_secs(946_684_800)) // 10_957 (days) * 86_400 (seconds)
+        .expect("You came from the past")
+        .as_secs()
 }
 
 #[cfg(test)]
