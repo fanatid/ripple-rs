@@ -259,7 +259,10 @@ impl Peer {
 
         match code {
             101 => {
-                // self.read_buf? = Some(buf);
+                if !buf.is_empty() {
+                    panic!("Read more data than expected on successful handshake...");
+                }
+
                 Ok(())
             }
             400 => Err(HandshakeError::BadRequest(
