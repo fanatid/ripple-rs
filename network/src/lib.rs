@@ -10,6 +10,8 @@
 
 //! Our bridge to ripple network.
 
+#![feature(ip)]
+
 #[macro_use]
 extern crate quick_error;
 

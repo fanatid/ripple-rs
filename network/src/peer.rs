@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -162,8 +162,28 @@ impl Peer {
                     return Err(HandshakeError::InvalidHeader("Connect-As", reason));
                 }
 
-                // Remote-IP: {}
-                // Local-IP: {}
+                if let Some(value) = find_header("Remote-IP") {
+                    let parsed = value.parse::<IpAddr>();
+                    let _ip = parsed.map_err(|e| HandshakeError::InvalidRemoteIp(e.to_string()))?;
+
+                    // if ip.is_global() && `public ip specified in config` && ip != `specified global ip from config` {
+                    //     let reason = format!("{} instead of {}", ip, ?);
+                    //     return Err(HandshakeError::InvalidRemoteIp(reason));
+                    // }
+                }
+
+                if let Some(value) = find_header("Local-IP") {
+                    let parsed = value.parse::<IpAddr>();
+                    let ip = parsed.map_err(|e| HandshakeError::InvalidLocalIp(e.to_string()))?;
+
+                    let stream = self.stream.get_ref();
+                    let remote = stream.peer_addr().map_err(HandshakeError::Io)?.ip();
+
+                    if remote.is_global() && remote != ip {
+                        let reason = format!("{} instead of {}", ip, remote);
+                        return Err(HandshakeError::InvalidLocalIp(reason));
+                    }
+                }
 
                 let network_id = match find_header("Network-Id") {
                     Some(value) => value
@@ -174,7 +194,7 @@ impl Peer {
                 if network_id != self.network_id {
                     let expected = self.network_id.value();
                     let received = network_id.value();
-                    let reason = format!("expected {}, received {}", expected, received);
+                    let reason = format!("{} instead of {}", received, expected);
                     return Err(HandshakeError::InvalidNetworkId(reason));
                 }
 
@@ -407,6 +427,12 @@ quick_error! {
         }
         InvalidNetworkTime(reason: String) {
             display("Invalid network time: {}", reason)
+        }
+        InvalidRemoteIp(reason: String) {
+            display("Invalid remote ip: {}", reason)
+        }
+        InvalidLocalIp(reason: String) {
+            display("Invalid local ip: {}", reason)
         }
         InvalidMessage {
             display("Invalid message generated")
