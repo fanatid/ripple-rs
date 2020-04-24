@@ -55,7 +55,7 @@ impl Network {
 
     /// Start network. Resolve nodes addrs, connect and communicate.
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut addrs = Self::get_bootstrap_addrs().await;
+        let mut addrs = Self::load_peer_addrs().await;
 
         let peer = loop {
             addrs.shuffle(&mut rand::thread_rng());
@@ -116,7 +116,7 @@ impl Network {
 
     /// Return pre-defined nodes.
     /// https://github.com/ripple/rippled/blob/1.5.0/src/ripple/overlay/impl/OverlayImpl.cpp#L536-L544
-    const fn get_bootstrap_nodes() -> [&'static str; 3] {
+    const fn get_bootstrap_peer_nodes() -> [&'static str; 3] {
         [
             // Pool of servers operated by Ripple Labs Inc. - https://ripple.com
             "r.ripple.com:51235",
@@ -128,8 +128,8 @@ impl Network {
     }
 
     /// Resolve nodes to addrs.
-    async fn get_bootstrap_addrs() -> Vec<SocketAddr> {
-        let nodes = Self::get_bootstrap_nodes();
+    async fn get_bootstrap_peer_addrs() -> Vec<SocketAddr> {
+        let nodes = Self::get_bootstrap_peer_nodes();
 
         let futs = nodes.iter().map(|node| async move {
             match lookup_host(node).await {
@@ -141,7 +141,13 @@ impl Network {
             }
         });
         let addrs = join_all(futs).await;
-        let mut addrs = addrs.into_iter().flatten().collect::<Vec<SocketAddr>>();
+        addrs.into_iter().flatten().collect()
+    }
+
+    /// Load peers addresses from storage or use bootstrap addresses.
+    async fn load_peer_addrs() -> Vec<SocketAddr> {
+        // TODO: load from storage
+        let mut addrs = Self::get_bootstrap_peer_addrs().await;
         addrs.dedup();
         addrs
     }
