@@ -28,8 +28,8 @@ fn main() {
         .build()
         .expect("Building runtime");
 
-    let network = Network::new();
-    if let Err(error) = runtime.block_on(network.connect()) {
+    let mut network = Network::new();
+    if let Err(error) = runtime.block_on(network.run()) {
         logj::error!("{}", error);
         std::process::exit(1);
     }

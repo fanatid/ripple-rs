@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use crypto::Secp256k1Keys;
 use futures::future::join_all;
+use rand::seq::SliceRandom;
 use tokio::net::lookup_host;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 pub use peer::Peer;
 
@@ -32,48 +34,84 @@ pub struct Network {
     // nodes_max: usize,
     // peers: Vec<Peer>,
     node_key: Arc<Secp256k1Keys>,
+    msg_tx: UnboundedSender<Result<protocol::Message, peer::SendRecvError>>,
+    msg_rx: UnboundedReceiver<Result<protocol::Message, peer::SendRecvError>>,
 }
 
 impl Network {
     /// Create new Network.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Network {
+        let (msg_tx, msg_rx) = unbounded_channel();
+
         Network {
             // nodes_max: 1,
             // peers: vec![],
             node_key: Arc::new(Secp256k1Keys::random()),
+            msg_tx,
+            msg_rx,
         }
     }
 
-    /// Connect to resolved nodes.
-    pub async fn connect(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let addrs = Self::get_bootstrap_addrs().await;
+    /// Start network. Resolve nodes addrs, connect and communicate.
+    pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut addrs = Self::get_bootstrap_addrs().await;
 
-        for addr in addrs {
-            if addr.is_ipv4() {
-                match Peer::from_addr(addr, self.node_key.clone()).await {
-                    Ok(mut peer) => match peer.connect().await {
-                        Ok(_) => loop {
-                            let msg = peer.read_message().await?;
-                            let dbg = format!("{:?}", msg);
-                            println!("Received: {:?}", dbg.split('(').next().unwrap());
-                        },
-                        Err(peer::HandshakeError::Unavailable(ips)) => {
-                            logj::info!("Unavailable peer: {}. Provide peers: {:?}", addr, ips);
-                            // addrs.append(&mut ips);
-                        }
-                        Err(error) => {
-                            logj::error!("Failed handshake with peer {}: {}", addr, error);
-                        }
-                    },
-                    Err(error) => {
-                        logj::error!("Failed connect to peer {}: {}", addr, error);
-                    }
-                };
+        let peer = loop {
+            addrs.shuffle(&mut rand::thread_rng());
+            let addr = match addrs.pop() {
+                Some(addr) => addr,
+                None => break None,
+            };
+            if addr.is_ipv6() {
+                continue;
+            }
+
+            match self.connect_to(addr).await {
+                Ok(peer) => break Some(peer),
+                Err(PeerError::Connect(error)) => {
+                    logj::error!("Failed connect to peer {}: {}", addr, error)
+                }
+                Err(PeerError::Handshake(error)) => {
+                    logj::error!("Failed handshake with peer {}: {}", addr, error);
+                }
+                Err(PeerError::Unavailable(mut ips)) => {
+                    addrs.append(&mut ips);
+                    addrs.dedup();
+                    logj::error!("Peer unavailable, give {} peers", ips.len());
+                }
+            }
+        };
+        if peer.is_none() {
+            panic!("Was not able connect to any peer");
+        }
+
+        while let Some(msg) = self.msg_rx.recv().await {
+            match msg {
+                Ok(msg) => {
+                    let dbg = format!("{:?}", msg);
+                    println!("Received: {:?}", dbg.split('(').next().unwrap());
+                }
+                Err(error) => {
+                    logj::error!("Peer error: {}", error);
+                    break;
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// Connect to resolved nodes.
+    pub async fn connect_to(&self, addr: SocketAddr) -> Result<Arc<Peer>, PeerError> {
+        match Peer::from_addr(addr, self.node_key.clone(), self.msg_tx.clone()).await {
+            Ok(peer) => match peer.connect().await {
+                Ok(_) => Ok(peer),
+                Err(peer::HandshakeError::Unavailable(ips)) => Err(PeerError::Unavailable(ips)),
+                Err(error) => Err(PeerError::Handshake(error)),
+            },
+            Err(error) => Err(PeerError::Connect(error)),
+        }
     }
 
     /// Return pre-defined nodes.
@@ -103,7 +141,26 @@ impl Network {
             }
         });
         let addrs = join_all(futs).await;
-        addrs.into_iter().flatten().collect()
+        let mut addrs = addrs.into_iter().flatten().collect::<Vec<SocketAddr>>();
+        addrs.dedup();
+        addrs
+    }
+}
+
+quick_error! {
+    /// Possible peer errors.
+    #[allow(missing_docs)]
+    #[derive(Debug)]
+    pub enum PeerError {
+        Connect(error: peer::ConnectError) {
+            display("{}", error)
+        }
+        Handshake(error: peer::HandshakeError) {
+            display("{}", error)
+        }
+        Unavailable(ips: Vec<SocketAddr>) {
+            display("Unavailable, give peers: {:?}", ips)
+        }
     }
 }
 

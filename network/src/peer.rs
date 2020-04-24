@@ -8,10 +8,11 @@ use bytes::{Buf, Bytes, BytesMut};
 use crypto::secp256k1::{Message, PublicKey, Signature};
 use crypto::sha2::{Digest, Sha512};
 use crypto::Secp256k1Keys;
-use openssl::ssl::SslStream;
+use openssl::ssl::{SslRef, SslStream};
 use serde::{de, Deserialize, Deserializer, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, Error as IoError};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::{mpsc::UnboundedSender, Mutex};
 use tokio_tls::TlsStream;
 
 use super::NetworkId;
@@ -31,9 +32,15 @@ use super::NetworkId;
 pub struct Peer {
     // node_key as ref?
     node_key: Arc<Secp256k1Keys>,
+    msg_tx: UnboundedSender<Result<protocol::Message, SendRecvError>>,
     network_id: NetworkId,
-    stream: TlsStream<TcpStream>,
-    read_buf: BytesMut,
+    //
+    peer_addr: SocketAddr,
+    // connection is complete mess right now, move to own struct
+    // (mix of openssl + TcpStream + ReadHalf/WriteHalf + BufStream?)
+    ssl: &'static SslRef,
+    stream_tx: Mutex<tokio::io::WriteHalf<TlsStream<TcpStream>>>,
+    stream_rx: Mutex<tokio::io::ReadHalf<TlsStream<TcpStream>>>,
 }
 
 impl Peer {
@@ -47,7 +54,8 @@ impl Peer {
     pub async fn from_addr(
         addr: SocketAddr,
         node_key: Arc<Secp256k1Keys>,
-    ) -> Result<Peer, ConnectError> {
+        msg_tx: UnboundedSender<Result<protocol::Message, SendRecvError>>,
+    ) -> Result<Arc<Peer>, ConnectError> {
         let stream = TcpStream::connect(addr).await.map_err(ConnectError::Io)?;
         stream.set_nodelay(true).map_err(ConnectError::Io)?;
 
@@ -60,22 +68,38 @@ impl Peer {
         let cx = tokio_tls::TlsConnector::from(cx);
         let stream = cx.connect("", stream).await.map_err(ConnectError::Tls)?;
 
-        Ok(Peer {
+        let peer_addr = stream.get_ref().peer_addr().unwrap();
+        let ssl = unsafe {
+            // TODO: use openssl directly, without tokio_tls and native-tls
+            // https://docs.rs/tokio-tls/0.3.0/src/tokio_tls/lib.rs.html#43-47
+            // AllowStd have size 64
+            #[allow(trivial_casts)]
+            (*(&stream as *const _ as *const SslStream<[u8; 64]>)).ssl()
+        };
+
+        let (stream_rx, stream_tx) = tokio::io::split(stream);
+
+        Ok(Arc::new(Peer {
             node_key,
+            msg_tx,
             network_id: NetworkId::Main,
-            stream,
-            read_buf: BytesMut::with_capacity(128 * 1024),
-        })
+            peer_addr,
+            ssl,
+            stream_tx: Mutex::new(stream_tx),
+            stream_rx: Mutex::new(stream_rx),
+        }))
     }
 
     /// Outgoing handshake process.
-    pub async fn connect(&mut self) -> Result<(), HandshakeError> {
+    pub async fn connect(self: &Arc<Peer>) -> Result<(), HandshakeError> {
         self.handshake_send_request().await?;
-        self.handshake_read_response().await
+        self.handshake_read_response().await?;
+        Peer::read_messages(Arc::clone(&self));
+        Ok(())
     }
 
     /// Send handshake request.
-    async fn handshake_send_request(&mut self) -> Result<(), HandshakeError> {
+    async fn handshake_send_request(&self) -> Result<(), HandshakeError> {
         let mut content = format!(
             "\
             GET / HTTP/1.1\r\n\
@@ -94,8 +118,7 @@ impl Peer {
             self.handshake_create_signature()?
         );
 
-        let stream = self.stream.get_ref();
-        let remote = stream.peer_addr().map_err(HandshakeError::Io)?.ip();
+        let remote = self.peer_addr.ip();
         if remote.is_global() {
             content += &format!("Remote-IP: {}\r\n", remote);
         }
@@ -108,18 +131,18 @@ impl Peer {
 
         content += "\r\n";
 
-        self.stream
-            .write_all(content.as_bytes())
-            .await
-            .map_err(HandshakeError::Io)
+        let mut stream = self.stream_tx.lock().await;
+        let fut = stream.write_all(content.as_bytes());
+        fut.await.map_err(HandshakeError::Io)
     }
 
     /// Read peer handshake response for our handshake request.
-    async fn handshake_read_response(&mut self) -> Result<(), HandshakeError> {
+    async fn handshake_read_response(&self) -> Result<(), HandshakeError> {
         let mut buf = BytesMut::new();
 
+        let mut stream = self.stream_rx.lock().await;
         let code = loop {
-            let fut = self.stream.read_buf(&mut buf);
+            let fut = stream.read_buf(&mut buf);
             if fut.await.map_err(HandshakeError::Io)? == 0 {
                 return Err(HandshakeError::EndOfFile);
             }
@@ -175,9 +198,7 @@ impl Peer {
                     let parsed = value.parse::<IpAddr>();
                     let ip = parsed.map_err(|e| HandshakeError::InvalidLocalIp(e.to_string()))?;
 
-                    let stream = self.stream.get_ref();
-                    let remote = stream.peer_addr().map_err(HandshakeError::Io)?.ip();
-
+                    let remote = self.peer_addr.ip();
                     if remote.is_global() && remote != ip {
                         let reason = format!("{} instead of {}", ip, remote);
                         return Err(HandshakeError::InvalidLocalIp(reason));
@@ -221,7 +242,7 @@ impl Peer {
             // Previous-Ledger b2+kJlTVmP0zXTirE570dWaTSFDfnTM/fOftA2UoCxM=
             } else {
                 loop {
-                    let fut = self.stream.read_buf(&mut buf);
+                    let fut = stream.read_buf(&mut buf);
                     if fut.await.map_err(HandshakeError::Io)? == 0 {
                         break;
                     }
@@ -280,28 +301,20 @@ impl Peer {
 
     /// Create message for create/verify signature.
     fn handshake_mkshared(&self) -> Result<Message, HandshakeError> {
-        let ssl = unsafe {
-            // TODO: use openssl directly, without tokio_tls and native-tls
-            // https://docs.rs/tokio-tls/0.3.0/src/tokio_tls/lib.rs.html#43-47
-            // AllowStd have size 64
-            #[allow(trivial_casts)]
-            (*(&self.stream as *const _ as *const SslStream<[u8; 64]>)).ssl()
-        };
-
         let mut buf = Vec::<u8>::with_capacity(1024);
         buf.resize(buf.capacity(), 0);
 
-        let mut size = ssl.finished(&mut buf[..]);
+        let mut size = self.ssl.finished(&mut buf[..]);
         if size > buf.len() {
             buf.resize(size, 0);
-            size = ssl.finished(&mut buf[..]);
+            size = self.ssl.finished(&mut buf[..]);
         }
         let cookie1 = Sha512::digest(&buf[..size]);
 
-        let mut size = ssl.peer_finished(&mut buf[..]);
+        let mut size = self.ssl.peer_finished(&mut buf[..]);
         if size > buf.len() {
             buf.resize(size, 0);
-            size = ssl.peer_finished(&mut buf[..]);
+            size = self.ssl.peer_finished(&mut buf[..]);
         }
         let cookie2 = Sha512::digest(&buf[..size]);
 
@@ -347,50 +360,57 @@ impl Peer {
     }
 
     /// Read message from peer.
-    pub async fn read_message(&mut self) -> Result<protocol::Message, Box<dyn std::error::Error>> {
-        // TODO: fiture out buffer required for most of messages.
-        // TODO: run in spawn + send through mpsc to network?
-        loop {
-            match self.stream.read_buf(&mut self.read_buf).await {
-                Ok(size) => {
-                    if size == 0 {
-                        println!(
-                            "Current buffer: {}",
-                            String::from_utf8_lossy(self.read_buf.bytes()).trim()
-                        );
-                        panic!("socket closed");
+    fn read_messages(self: Arc<Peer>) {
+        let _join_handle = tokio::spawn(async move {
+            // TODO: fiture out buffer required for most of messages.
+            let mut buf = BytesMut::new();
+            let mut stream = self.stream_rx.lock().await;
+
+            loop {
+                match stream.read_buf(&mut buf).await {
+                    Ok(size) => {
+                        if size == 0 {
+                            println!(
+                                "Current buffer: {}",
+                                String::from_utf8_lossy(buf.bytes()).trim()
+                            );
+                            panic!("socket closed");
+                        }
+                    }
+                    Err(error) => {
+                        panic!("Socket read error: {}", error);
                     }
                 }
-                Err(error) => {
-                    panic!("Socket read error: {}", error);
+
+                if buf.len() > 6 {
+                    let bytes = buf.bytes();
+
+                    if bytes[0] & 0xFC != 0 {
+                        panic!("Unknow version header");
+                    }
+
+                    let payload_size = BigEndian::read_u32(&bytes[0..4]) as usize;
+                    let message_type = BigEndian::read_u16(&bytes[4..6]);
+
+                    if payload_size > 64 * 1024 * 1024 {
+                        panic!("Too big message size");
+                    }
+
+                    if buf.len() >= 6 + payload_size {
+                        let bytes = Bytes::copy_from_slice(&buf.bytes()[6..6 + payload_size]);
+                        let msg = protocol::Message::decode(message_type as i32, bytes)
+                            .map_err(|_| SendRecvError::Decode);
+                        buf.advance(6 + payload_size);
+
+                        self.msg_tx.send(msg).unwrap();
+                    }
                 }
             }
-
-            if self.read_buf.len() > 6 {
-                let bytes = self.read_buf.bytes();
-
-                if bytes[0] & 0xFC != 0 {
-                    panic!("Unknow version header");
-                }
-
-                let payload_size = BigEndian::read_u32(&bytes[0..4]) as usize;
-                let message_type = BigEndian::read_u16(&bytes[4..6]);
-
-                if payload_size > 64 * 1024 * 1024 {
-                    panic!("Too big message size");
-                }
-
-                if self.read_buf.len() >= 6 + payload_size {
-                    let bytes = Bytes::copy_from_slice(&self.read_buf.bytes()[6..6 + payload_size]);
-                    let msg = protocol::Message::decode(message_type as i32, bytes)?;
-                    self.read_buf.advance(6 + payload_size);
-                    return Ok(msg);
-                }
-            }
-        }
+        });
     }
 
     // pub async fn send_message(&self, ?) -> Result<(), ?> {
+    //     // should lock `stream_tx`, otherwise other fut can produce mixed write
     //     self.stream.lock()
     // }
 }
@@ -399,7 +419,7 @@ quick_error! {
     /// Possible errors on connecting to peer.
     #[derive(Debug)]
     pub enum ConnectError {
-        Io(error: IoError) {
+        Io(error: io::Error) {
             display("{}", error)
         }
         Tls(error: native_tls::Error) {
@@ -412,7 +432,7 @@ quick_error! {
     /// Possible errors during handshake process.
     #[derive(Debug)]
     pub enum HandshakeError {
-        Io(error: IoError) {
+        Io(error: io::Error) {
             display("{}", error)
         }
         EndOfFile {
@@ -462,6 +482,19 @@ quick_error! {
         }
         UnexpectedHttpStatus(status: u16) {
             display("Unexpected HTTP status: {}", status)
+        }
+    }
+}
+
+quick_error! {
+    /// Possible errors on read/write.
+    #[derive(Debug)]
+    pub enum SendRecvError {
+        Io(error: io::Error) {
+            display("{}", error)
+        }
+        Decode {
+            display("")
         }
     }
 }
@@ -518,7 +551,7 @@ mod tests {
 
     #[test]
     fn peer_ips_decode_encode() {
-        let data = r#"{"peer-ips":["54.68.219.39:51235","54.187.191.179:51235","107.150.55.21:6561","54.186.230.77:51235","54.187.110.243:51235","85.127.34.221:51235","50.43.33.236:51235","54.187.138.75:51235"]}"#;
+        let data = r#"{"peer-ips":["54.68.219.39:51235","54.187.191.179:51235"]}"#;
 
         let body = serde_json::from_str::<PeerUnavailableBody>(data);
         assert!(body.is_ok());
