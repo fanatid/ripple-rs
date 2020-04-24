@@ -236,10 +236,14 @@ impl Peer {
                 // self.peer_public_key = Some(self.handshake_verify_signature(sig, public_key)?);
                 let _ = self.handshake_verify_signature(sig, public_key)?;
 
-            // Crawl public
-            // Closed-Ledger W8hR7+Q1acWpc1fcKXA6J0Qa9pmJ4dxjvKkacx/6GC8=
-            // Previous-Ledger b2+kJlTVmP0zXTirE570dWaTSFDfnTM/fOftA2UoCxM=
+                // Crawl public
+                // Closed-Ledger W8hR7+Q1acWpc1fcKXA6J0Qa9pmJ4dxjvKkacx/6GC8=
+                // Previous-Ledger b2+kJlTVmP0zXTirE570dWaTSFDfnTM/fOftA2UoCxM=
+
+                buf.advance(status.unwrap());
             } else {
+                buf.advance(status.unwrap());
+
                 loop {
                     let fut = stream.read_buf(&mut buf);
                     if fut.await.map_err(HandshakeError::Io)? == 0 {
@@ -273,7 +277,6 @@ impl Peer {
                 buf = buf2;
             }
 
-            buf.advance(status.unwrap());
             break code;
         };
 
