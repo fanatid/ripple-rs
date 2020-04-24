@@ -634,10 +634,10 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "bs58_ripple",
- "byteorder",
  "bytes",
  "crypto",
  "futures",
+ "hex",
  "httparse",
  "logj",
  "native-tls",

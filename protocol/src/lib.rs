@@ -11,9 +11,9 @@
 //! Ripple protocol messages in [protobuf](https://developers.google.com/protocol-buffers).
 
 use bytes::Buf;
-use prost::Message as _;
+use prost::{DecodeError, Message as _};
 
-mod proto;
+pub mod proto;
 
 /// All possible messages in protocol
 #[allow(missing_docs)] // TODO: remove
@@ -39,11 +39,14 @@ pub enum Message {
 }
 
 impl Message {
-    /// Decode message type ([`i32`][i32]) and [`Buf`][bytes::Buf] to [`Message`][Message].
-    pub fn decode<B: Buf>(message_type: i32, buf: B) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Decode [`Buf`][bytes::Buf] to [`Message`][Message].
+    /// First 2 bytes in buffer is message type, rest is encoded message.
+    pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, DecodeError> {
         use proto::MessageType;
 
-        let message_type = MessageType::from_i32(message_type).expect("Valid message type");
+        let message_type = buf.get_u16() as i32;
+        let message_type = MessageType::from_i32(message_type).expect("Invalid message type");
+
         let msg = match message_type {
             MessageType::MtManifests => Message::Manifests(proto::TmManifests::decode(buf)?),
             MessageType::MtPing => Message::Ping(proto::TmPing::decode(buf)?),
@@ -78,7 +81,6 @@ impl Message {
             }
         };
 
-        // assert: buf.len() == 0
         Ok(msg)
     }
 }

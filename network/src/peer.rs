@@ -3,8 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use byteorder::{BigEndian, ByteOrder};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use crypto::secp256k1::{Message, PublicKey, Signature};
 use crypto::sha2::{Digest, Sha512};
 use crypto::Secp256k1Keys;
@@ -362,48 +361,66 @@ impl Peer {
     /// Read message from peer.
     fn read_messages(self: Arc<Peer>) {
         let _join_handle = tokio::spawn(async move {
-            // TODO: fiture out buffer required for most of messages.
-            let mut buf = BytesMut::new();
+            // `unsafe` and `unwrap`... but we have one buffer which used for most of messages.
+            // If buffer small we allocated bigger one, which will be dropped after sending message.
             let mut stream = self.stream_rx.lock().await;
+            let mut payload_size_buf = [0u8; 4];
+            // 128 KiB should be enough for most messages, right?
+            let mut read_buf = BytesMut::with_capacity(128 * 1024);
+            let mut read_buf2 = None;
 
             loop {
-                match stream.read_buf(&mut buf).await {
-                    Ok(size) => {
-                        if size == 0 {
-                            println!(
-                                "Current buffer: {}",
-                                String::from_utf8_lossy(buf.bytes()).trim()
-                            );
-                            panic!("socket closed");
-                        }
-                    }
-                    Err(error) => {
-                        panic!("Socket read error: {}", error);
-                    }
+                if let Err(error) = stream.read_exact(&mut payload_size_buf).await {
+                    self.msg_tx.send(Err(SendRecvError::Io(error))).unwrap();
+                    break;
                 }
 
-                if buf.len() > 6 {
-                    let bytes = buf.bytes();
+                if payload_size_buf[0] & 0xFC != 0 {
+                    let error = SendRecvError::UnknowVersionHeader(payload_size_buf[0]);
+                    self.msg_tx.send(Err(error)).unwrap();
+                    break;
+                }
 
-                    if bytes[0] & 0xFC != 0 {
-                        panic!("Unknow version header");
-                    }
+                let payload_size = u32::from_be_bytes(payload_size_buf) as usize;
+                if payload_size > 64 * 1024 * 1024 {
+                    let error = SendRecvError::PayloadTooBig(payload_size);
+                    self.msg_tx.send(Err(error)).unwrap();
+                    break;
+                }
 
-                    let payload_size = BigEndian::read_u32(&bytes[0..4]) as usize;
-                    let message_type = BigEndian::read_u16(&bytes[4..6]);
+                let mut buf = if payload_size > read_buf.capacity() - 2 {
+                    read_buf.clear();
+                    &mut read_buf
+                } else {
+                    read_buf2 = Some(BytesMut::with_capacity(payload_size + 2));
+                    read_buf2.as_mut().unwrap()
+                };
 
-                    if payload_size > 64 * 1024 * 1024 {
-                        panic!("Too big message size");
-                    }
+                let payload_size = payload_size + 2;
+                let bytes = buf.bytes_mut();
+                let bytes = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        bytes[0].as_mut_ptr(),
+                        std::cmp::min(bytes.len(), payload_size),
+                    )
+                };
+                assert!(
+                    bytes.len() == payload_size,
+                    "Not enough bytes on read message"
+                );
+                if let Err(error) = stream.read_exact(bytes).await {
+                    self.msg_tx.send(Err(SendRecvError::Io(error))).unwrap();
+                    break;
+                }
+                unsafe {
+                    buf.advance_mut(payload_size);
+                }
 
-                    if buf.len() >= 6 + payload_size {
-                        let bytes = Bytes::copy_from_slice(&buf.bytes()[6..6 + payload_size]);
-                        let msg = protocol::Message::decode(message_type as i32, bytes)
-                            .map_err(|_| SendRecvError::Decode);
-                        buf.advance(6 + payload_size);
+                let msg = protocol::Message::decode(&mut buf).map_err(|_| SendRecvError::Decode);
+                self.msg_tx.send(msg).unwrap();
 
-                        self.msg_tx.send(msg).unwrap();
-                    }
+                if read_buf2.is_some() {
+                    drop(read_buf2.take().unwrap());
                 }
             }
         });
@@ -469,7 +486,7 @@ quick_error! {
             display("Signature verification failed")
         }
         InvalidChunkedBody(body: BytesMut) {
-            display("Invalid chunked body: {:?}", &body.bytes())
+            display("Invalid chunked body: {}", hex::encode(body))
         }
         BadRequest(reason: String) {
             display("Bad request: {}", reason)
@@ -492,6 +509,12 @@ quick_error! {
     pub enum SendRecvError {
         Io(error: io::Error) {
             display("{}", error)
+        }
+        UnknowVersionHeader(version: u8) {
+            display("Unknow version header: {}", version)
+        }
+        PayloadTooBig(size: usize) {
+            display("Message payload too big: {}", size)
         }
         Decode {
             display("")
