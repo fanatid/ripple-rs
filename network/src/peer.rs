@@ -143,7 +143,8 @@ impl Peer {
         let code = loop {
             let fut = stream.read_buf(&mut buf);
             if fut.await.map_err(HandshakeError::Io)? == 0 {
-                return Err(HandshakeError::EndOfFile);
+                let error = io::Error::new(io::ErrorKind::UnexpectedEof, "early eof");
+                return Err(HandshakeError::Io(error));
             }
 
             let mut headers = [httparse::EMPTY_HEADER; 32];
@@ -454,9 +455,6 @@ quick_error! {
     pub enum HandshakeError {
         Io(error: io::Error) {
             display("{}", error)
-        }
-        EndOfFile {
-            display("Socket reached end-of-file")
         }
         MissingHeader(name: &'static str) {
             display(r#"Header "{}" required"#, name)
