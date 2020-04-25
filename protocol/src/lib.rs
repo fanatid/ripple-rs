@@ -16,25 +16,45 @@ use prost::{DecodeError, Message as _};
 pub mod proto;
 
 /// All possible messages in protocol
-#[allow(missing_docs)] // TODO: remove
 #[derive(Debug)]
 pub enum Message {
+    /// Validators manifests. On protocol start all known manifest sent to connected peer.
+    /// If peer receive new manifest it's can be resent to other peers.
     Manifests(proto::TmManifests),
+    /// Ping/Pong messages. It's not required sent pings, but we always should send pong as reply.
+    /// If pong will not be received during few timer triggers connection will be closed.
+    /// By default, timer interval is 8s, no ping limit is 10, i.e. limit is 80s.
     Ping(proto::TmPing),
+    /// Cluster related. Ignore.
     Cluster(proto::TmCluster),
+    /// Receive other peers endpoints. Rippled sent such message every ~1s.
     Endpoints(proto::TmEndpoints),
+    /// Relayed transaction. Need more info.
     Transaction(proto::TmTransaction),
+    /// Request ledger information, can be relayed. Need more info.
     GetLedger(proto::TmGetLedger),
+    /// Response on ledger request. Need more info.
     LedgerData(proto::TmLedgerData),
+    /// Not sure. Need more info.
     ProposeLedger(proto::TmProposeSet),
+    /// Peer status. Connection will be dropped in outgoing peer will not sent status after some time.
     StatusChange(proto::TmStatusChange),
+    /// Transactions set with root hash. Need more info.
     HaveSet(proto::TmHaveTransactionSet),
+    /// Need more info.
     Validation(proto::TmValidation),
+    /// Request/Response of different data.
     GetObjects(proto::TmGetObjectByHash),
+    /// Deprecated.
     GetShardInfo(proto::TmGetShardInfo),
+    /// Deprecated.
     ShardInfo(proto::TmShardInfo),
+    /// Request information about shards. Ignore.
     GetPeerShardInfo(proto::TmGetPeerShardInfo),
+    /// Response on request about shards. Ignore.
     PeerShardInfo(proto::TmPeerShardInfo),
+    /// Validators list. Supported from XRPL/1.2. Sent on startup. Can be relayed on receiving to
+    /// peers who have old validator sequence.
     Validatorlist(proto::TmValidatorList),
 }
 

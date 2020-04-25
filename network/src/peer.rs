@@ -104,7 +104,7 @@ impl Peer {
             GET / HTTP/1.1\r\n\
             User-Agent: rrd-0.0.0\r\n\
             Connection: Upgrade\r\n\
-            Upgrade: XRPL/2.0\r\n\
+            Upgrade: XRPL/2.1\r\n\
             Connect-As: Peer\r\n\
             Network-ID: {}\r\n\
             Network-Time: {}\r\n\
@@ -174,8 +174,8 @@ impl Peer {
                     return Err(HandshakeError::InvalidHeader("Connection", reason));
                 }
 
-                if get_header("Upgrade")? != "XRPL/2.0" {
-                    let reason = r#"Only "XRPL/2.0" supported right now"#.to_owned();
+                if get_header("Upgrade")? != "XRPL/2.1" {
+                    let reason = r#"Only "XRPL/2.1" supported right now"#.to_owned();
                     return Err(HandshakeError::InvalidHeader("Upgrade", reason));
                 }
 
@@ -252,6 +252,7 @@ impl Peer {
                     }
                 }
 
+                println!("debug, not 101 response: {}", String::from_utf8_lossy(&buf));
                 // chunked-encoding...
                 let mut buf1 = buf.clone();
                 let mut buf2 = BytesMut::with_capacity(buf.len());
