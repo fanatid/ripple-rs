@@ -22,7 +22,6 @@ use crypto::Secp256k1Keys;
 use futures::future::join_all;
 use rand::seq::SliceRandom;
 use tokio::net::lookup_host;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 pub use peer::Peer;
 
@@ -34,22 +33,16 @@ pub struct Network {
     // nodes_max: usize,
     // peers: Vec<Peer>,
     node_key: Arc<Secp256k1Keys>,
-    msg_tx: UnboundedSender<Result<protocol::Message, peer::SendRecvError>>,
-    msg_rx: UnboundedReceiver<Result<protocol::Message, peer::SendRecvError>>,
 }
 
 impl Network {
     /// Create new Network.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Network {
-        let (msg_tx, msg_rx) = unbounded_channel();
-
         Network {
             // nodes_max: 1,
             // peers: vec![],
             node_key: Arc::new(Secp256k1Keys::random()),
-            msg_tx,
-            msg_rx,
         }
     }
 
@@ -86,25 +79,15 @@ impl Network {
             panic!("Was not able connect to any peer");
         }
 
-        while let Some(msg) = self.msg_rx.recv().await {
-            match msg {
-                Ok(msg) => {
-                    let dbg = format!("{:?}", msg);
-                    println!("Received: {:?}", dbg.split('(').next().unwrap());
-                }
-                Err(error) => {
-                    logj::error!("Peer error: {}", error);
-                    break;
-                }
-            }
-        }
+        // temporary...
+        tokio::time::delay_for(std::time::Duration::from_secs(24 * 60 * 60)).await;
 
         Ok(())
     }
 
     /// Connect to resolved nodes.
     pub async fn connect_to(&self, addr: SocketAddr) -> Result<Arc<Peer>, PeerError> {
-        match Peer::from_addr(addr, self.node_key.clone(), self.msg_tx.clone()).await {
+        match Peer::from_addr(addr, self.node_key.clone()).await {
             Ok(peer) => match peer.connect().await {
                 Ok(_) => Ok(peer),
                 Err(peer::HandshakeError::Unavailable(ips)) => Err(PeerError::Unavailable(ips)),

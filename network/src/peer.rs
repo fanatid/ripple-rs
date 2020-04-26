@@ -11,7 +11,7 @@ use openssl::ssl::{SslRef, SslStream};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc::UnboundedSender, Mutex};
+use tokio::sync::Mutex;
 use tokio_tls::TlsStream;
 
 use super::NetworkId;
@@ -31,7 +31,6 @@ use super::NetworkId;
 pub struct Peer {
     // node_key as ref?
     node_key: Arc<Secp256k1Keys>,
-    msg_tx: UnboundedSender<Result<protocol::Message, SendRecvError>>,
     network_id: NetworkId,
     //
     peer_addr: SocketAddr,
@@ -53,7 +52,6 @@ impl Peer {
     pub async fn from_addr(
         addr: SocketAddr,
         node_key: Arc<Secp256k1Keys>,
-        msg_tx: UnboundedSender<Result<protocol::Message, SendRecvError>>,
     ) -> Result<Arc<Peer>, ConnectError> {
         let stream = TcpStream::connect(addr).await.map_err(ConnectError::Io)?;
         stream.set_nodelay(true).map_err(ConnectError::Io)?;
@@ -80,7 +78,6 @@ impl Peer {
 
         Ok(Arc::new(Peer {
             node_key,
-            msg_tx,
             network_id: NetworkId::Main,
             peer_addr,
             ssl,
@@ -252,7 +249,11 @@ impl Peer {
                     }
                 }
 
-                println!("debug, not 101 response: {}", String::from_utf8_lossy(&buf));
+                println!(
+                    "debug, not 101 response: {} => {}",
+                    hex::encode(&buf),
+                    String::from_utf8_lossy(&buf).trim()
+                );
                 // chunked-encoding...
                 let mut buf1 = buf.clone();
                 let mut buf2 = BytesMut::with_capacity(buf.len());
@@ -366,69 +367,75 @@ impl Peer {
     /// Read message from peer.
     fn read_messages(self: Arc<Peer>) {
         let _join_handle = tokio::spawn(async move {
-            // `unsafe` and `unwrap`... but we have one buffer which used for most of messages.
-            // If buffer small we allocated bigger one, which will be dropped after sending message.
-            let mut stream = self.stream_rx.lock().await;
-            let mut payload_size_buf = [0u8; 4];
             // 128 KiB should be enough for most messages, right?
             let mut read_buf = BytesMut::with_capacity(128 * 1024);
-            let mut read_buf2 = None;
 
             loop {
-                if let Err(error) = stream.read_exact(&mut payload_size_buf).await {
-                    self.msg_tx.send(Err(SendRecvError::Io(error))).unwrap();
-                    break;
-                }
-
-                if payload_size_buf[0] & 0xFC != 0 {
-                    let error = SendRecvError::UnknowVersionHeader(payload_size_buf[0]);
-                    self.msg_tx.send(Err(error)).unwrap();
-                    break;
-                }
-
-                let payload_size = u32::from_be_bytes(payload_size_buf) as usize;
-                if payload_size > 64 * 1024 * 1024 {
-                    let error = SendRecvError::PayloadTooBig(payload_size);
-                    self.msg_tx.send(Err(error)).unwrap();
-                    break;
-                }
-
-                let mut buf = if payload_size > read_buf.capacity() - 2 {
-                    read_buf.clear();
-                    &mut read_buf
-                } else {
-                    read_buf2 = Some(BytesMut::with_capacity(payload_size + 2));
-                    read_buf2.as_mut().unwrap()
+                read_buf.clear();
+                let msg = match self.read_message(&mut read_buf).await {
+                    Ok(msg) => msg,
+                    Err(error) => {
+                        logj::error!("Peer read error: {}", error);
+                        break;
+                    }
                 };
 
-                let payload_size = payload_size + 2;
-                let bytes = buf.bytes_mut();
-                let bytes = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        bytes[0].as_mut_ptr(),
-                        std::cmp::min(bytes.len(), payload_size),
-                    )
-                };
-                assert!(
-                    bytes.len() == payload_size,
-                    "Not enough bytes on read message"
-                );
-                if let Err(error) = stream.read_exact(bytes).await {
-                    self.msg_tx.send(Err(SendRecvError::Io(error))).unwrap();
-                    break;
-                }
-                unsafe {
-                    buf.advance_mut(payload_size);
-                }
-
-                let msg = protocol::Message::decode(&mut buf).map_err(|_| SendRecvError::Decode);
-                self.msg_tx.send(msg).unwrap();
-
-                if read_buf2.is_some() {
-                    drop(read_buf2.take().unwrap());
-                }
+                let dbg = format!("{:?}", msg);
+                println!("Received: {:?}", dbg.split('(').next().unwrap());
             }
         });
+    }
+
+    // `unsafe` and `unwrap`... but we have one buffer which used for most of messages.
+    // If buffer small we allocated bigger one, which will be dropped after reading message.
+    async fn read_message(
+        self: &Arc<Self>,
+        read_buf: &mut BytesMut,
+    ) -> Result<protocol::Message, SendRecvError> {
+        let mut payload_size_buf = [0u8; 4];
+        let mut stream = self.stream_rx.lock().await;
+        let mut read_buf2;
+
+        if let Err(error) = stream.read_exact(&mut payload_size_buf).await {
+            return Err(SendRecvError::Io(error));
+        }
+
+        if payload_size_buf[0] & 0xFC != 0 {
+            let error = SendRecvError::UnknowVersionHeader(payload_size_buf[0]);
+            return Err(error);
+        }
+
+        let payload_size = u32::from_be_bytes(payload_size_buf) as usize;
+        if payload_size > 64 * 1024 * 1024 {
+            let error = SendRecvError::PayloadTooBig(payload_size);
+            return Err(error);
+        }
+
+        let msg_size = payload_size + 2;
+        let mut buf = if msg_size <= read_buf.capacity() {
+            read_buf
+        } else {
+            read_buf2 = BytesMut::with_capacity(msg_size);
+            &mut read_buf2
+        };
+
+        let bytes = buf.bytes_mut();
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(
+                bytes[0].as_mut_ptr(),
+                std::cmp::min(bytes.len(), msg_size),
+            )
+        };
+        assert!(bytes.len() >= msg_size, "Not enough bytes for read message");
+
+        if let Err(error) = stream.read_exact(bytes).await {
+            return Err(SendRecvError::Io(error));
+        }
+        unsafe {
+            buf.advance_mut(bytes.len());
+        }
+
+        Ok(protocol::Message::decode(&mut buf).map_err(|_| SendRecvError::Decode)?)
     }
 
     // pub async fn send_message(&self, ?) -> Result<(), ?> {
