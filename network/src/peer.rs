@@ -378,6 +378,9 @@ impl Peer {
             // 128 KiB should be enough for most messages, right?
             let mut read_buf = BytesMut::with_capacity(128 * 1024);
 
+            let mut map = std::collections::HashMap::<String, usize>::new();
+            let mut tp = std::time::Instant::now();
+
             loop {
                 read_buf.clear();
                 let msg = match self.read_message(&mut read_buf).await {
@@ -389,7 +392,13 @@ impl Peer {
                 };
 
                 let dbg = format!("{:?}", msg);
-                println!("Received: {:?}", dbg.split('(').next().unwrap());
+                // println!("Received: {:?}", dbg.split('(').next().unwrap());
+                let name = dbg.split('(').next().unwrap().to_string();
+                let _v = map.entry(name).and_modify(|v| *v += 1).or_insert(1);
+                if tp.elapsed() > std::time::Duration::from_secs(1) {
+                    println!("{:?}", map);
+                    tp = std::time::Instant::now();
+                }
             }
         });
     }
