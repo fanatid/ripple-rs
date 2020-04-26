@@ -69,9 +69,9 @@ impl Network {
                     logj::error!("Failed handshake with peer {}: {}", addr, error);
                 }
                 Err(PeerError::Unavailable(mut ips)) => {
+                    logj::error!("Peer unavailable, give {} peers", ips.len());
                     addrs.append(&mut ips);
                     addrs.dedup();
-                    logj::error!("Peer unavailable, give {} peers", ips.len());
                 }
             }
         };

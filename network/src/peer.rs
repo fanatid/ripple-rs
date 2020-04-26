@@ -151,18 +151,18 @@ impl Peer {
                 continue;
             }
 
+            let find_header = |name| {
+                resp.headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case(name))
+                    .map(|h| String::from_utf8_lossy(h.value))
+            };
+
+            let get_header =
+                |name| find_header(name).ok_or_else(|| HandshakeError::MissingHeader(name));
+
             let code = resp.code.unwrap();
             if code == 101 {
-                let find_header = |name| {
-                    resp.headers
-                        .iter()
-                        .find(|h| h.name.eq_ignore_ascii_case(name))
-                        .map(|h| String::from_utf8_lossy(h.value))
-                };
-
-                let get_header =
-                    |name| find_header(name).ok_or_else(|| HandshakeError::MissingHeader(name));
-
                 // self.peer_user_agent = Some(get_header!("Server").to_string());
                 let _ = get_header("Server")?;
 
@@ -240,8 +240,17 @@ impl Peer {
 
                 buf.advance(status.unwrap());
             } else {
+                let body_size = match find_header("Content-Length") {
+                    Some(header) => Some(header.parse::<usize>().map_err(|error| {
+                        HandshakeError::InvalidHeader("Content-Length", error.to_string())
+                    })?),
+                    None => None,
+                };
+
                 buf.advance(status.unwrap());
 
+                // TODO: parse on the fly for chunked-encoding
+                // TODO: read exact content-length
                 loop {
                     let fut = stream.read_buf(&mut buf);
                     if fut.await.map_err(HandshakeError::Io)? == 0 {
@@ -249,35 +258,31 @@ impl Peer {
                     }
                 }
 
-                println!(
-                    "debug, not 101 response: {} => {}",
-                    hex::encode(&buf),
-                    String::from_utf8_lossy(&buf).trim()
-                );
                 // chunked-encoding...
-                let mut buf1 = buf.clone();
-                let mut buf2 = BytesMut::with_capacity(buf.len());
-                while !buf1.is_empty() {
-                    let status = match httparse::parse_chunk_size(&buf1) {
-                        Ok(status) => status,
-                        Err(_) => return Err(HandshakeError::InvalidChunkedBody(buf)),
-                    };
+                if body_size.is_none() {
+                    let mut buf2 = BytesMut::with_capacity(buf.len());
+                    while !buf.is_empty() {
+                        let status = match httparse::parse_chunk_size(&buf) {
+                            Ok(status) => status,
+                            Err(_) => return Err(HandshakeError::InvalidChunkedBody(buf)),
+                        };
 
-                    if status.is_partial() {
-                        return Err(HandshakeError::InvalidChunkedBody(buf));
+                        if status.is_partial() {
+                            return Err(HandshakeError::InvalidChunkedBody(buf));
+                        }
+
+                        let (start, size) = status.unwrap();
+                        if size == 0 {
+                            break;
+                        }
+
+                        let end = start + size as usize;
+                        buf2.extend_from_slice(&buf.bytes()[start..end]);
+                        buf.advance(end);
                     }
 
-                    let (start, size) = status.unwrap();
-                    if size == 0 {
-                        break;
-                    }
-
-                    let end = start + size as usize;
-                    buf2.extend_from_slice(&buf1.bytes()[start..end]);
-                    buf1.advance(end);
+                    buf = buf2;
                 }
-
-                buf = buf2;
             }
 
             break code;
@@ -300,7 +305,10 @@ impl Peer {
                     String::from_utf8_lossy(&buf).to_string(),
                 )),
             },
-            _ => Err(HandshakeError::UnexpectedHttpStatus(code)),
+            _ => Err(HandshakeError::UnexpectedHttpStatus(
+                code,
+                String::from_utf8_lossy(&buf).to_string(),
+            )),
         }
     }
 
@@ -506,8 +514,8 @@ quick_error! {
         UnavailableBadBody(body: String) {
             display("Unavailable, can't parse body: {}", body)
         }
-        UnexpectedHttpStatus(status: u16) {
-            display("Unexpected HTTP status: {}", status)
+        UnexpectedHttpStatus(status: u16, body: String) {
+            display("Unexpected HTTP status: {}, body: {}", status, body)
         }
     }
 }
