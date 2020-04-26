@@ -65,8 +65,8 @@ impl Message {
         use proto::MessageType;
 
         let message_type = buf.get_u16() as i32;
-        // TODO: use DecodeError
-        let message_type = MessageType::from_i32(message_type).expect("Invalid message type");
+        let message_type = MessageType::from_i32(message_type)
+            .ok_or_else(|| DecodeError::new("invalid message"))?;
 
         let msg = match message_type {
             MessageType::MtManifests => Message::Manifests(proto::TmManifests::decode(buf)?),
