@@ -8,6 +8,7 @@ use crypto::secp256k1::{Message, PublicKey, Signature};
 use crypto::sha2::{Digest, Sha512};
 use crypto::Secp256k1Keys;
 use openssl::ssl::{SslRef, SslStream};
+use protocol::EncodeDecode;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -87,10 +88,10 @@ impl Peer {
     }
 
     /// Outgoing handshake process.
-    pub async fn connect(self: &Arc<Peer>) -> Result<(), HandshakeError> {
+    pub async fn connect(self: &Arc<Self>) -> Result<(), HandshakeError> {
         self.handshake_send_request().await?;
         self.handshake_read_response().await?;
-        Peer::read_messages(Arc::clone(&self));
+        Arc::clone(&self).read_messages();
         Ok(())
     }
 
@@ -372,46 +373,94 @@ impl Peer {
         }
     }
 
+    /// Send message to peer.
+    pub async fn send_message(&self, msg: protocol::Message) -> Result<(), SendRecvError> {
+        let size = msg.encoded_len();
+        let mut bytes = BytesMut::with_capacity(size + 4);
+        // Uncompressed value, the top six bits of the first byte are 0.
+        bytes.put_u32((size - 2) as u32); // 2 is message type
+        msg.encode(&mut bytes).map_err(SendRecvError::Encode)?;
+
+        let mut stream = self.stream_tx.lock().await;
+        stream.write_all(&bytes).await.map_err(SendRecvError::Io)?;
+        stream.flush().await.map_err(SendRecvError::Io)
+    }
+
+    /// Send message to peer in new asynchronous task.
+    pub fn send_message_spawn(self: Arc<Self>, msg: protocol::Message) {
+        let _join_handle = tokio::spawn(async move {
+            // TODO: shutdown
+            if let Err(error) = self.send_message(msg).await {
+                logj::error!("Peer send error: {}", error);
+            }
+        });
+    }
+
     /// Read message from peer.
     fn read_messages(self: Arc<Peer>) {
         let _join_handle = tokio::spawn(async move {
-            // 128 KiB should be enough for most messages, right?
-            let mut read_buf = BytesMut::with_capacity(128 * 1024);
+            // bytes::BytesMut not shrink back in any case
+            // We can have max message 64MiB, in worst case there will be 64MiB per peer.
+            // Create own BufMut?
+            // As result `unsafe` and `unwrap`... but we have one buffer which used for most of messages.
+            // When buffer not enough we allocate new.
+            let mut read_buf = Box::new(BytesMut::new());
 
-            let mut map = std::collections::HashMap::<String, usize>::new();
-            let mut tp = std::time::Instant::now();
+            // // Debug, for checking how protocol work.
+            // // {"GetPeerShardInfo": 1, "Endpoints": 16, "HaveSet": 316, "Manifests": 1, "Transaction": 1021, "Ping": 1, "StatusChange": 44, "ProposeLedger": 5233, "Validatorlist": 1, "Validation": 814}
+            // let mut map = std::collections::HashMap::<String, usize>::new();
+            // let mut tp = std::time::Instant::now();
+            // // DEBUG
 
             loop {
-                read_buf.clear();
                 let msg = match self.read_message(&mut read_buf).await {
                     Ok(msg) => msg,
                     Err(error) => {
                         logj::error!("Peer read error: {}", error);
+                        println!("{:?}", hex::encode(&read_buf.bytes()));
                         break;
                     }
                 };
 
-                let dbg = format!("{:?}", msg);
-                // println!("Received: {:?}", dbg.split('(').next().unwrap());
-                let name = dbg.split('(').next().unwrap().to_string();
-                let _v = map.entry(name).and_modify(|v| *v += 1).or_insert(1);
-                if tp.elapsed() > std::time::Duration::from_secs(1) {
-                    println!("{:?}", map);
-                    tp = std::time::Instant::now();
+                // // DEBUG
+                // let dbg = format!("{:?}", msg);
+                // // println!("Received: {:?}", dbg.split('(').next().unwrap());
+                // let name = dbg.split('(').next().unwrap().to_string();
+                // let _v = map.entry(name).and_modify(|v| *v += 1).or_insert(1);
+                // if tp.elapsed() > std::time::Duration::from_secs(1) {
+                //     let time = chrono::Local::now().format("%H:%M:%S").to_string();
+                //     println!("{}: {:?}", time, map);
+                //     tp = std::time::Instant::now();
+                // }
+                // // DEBUG
+
+                use protocol::Message::*;
+
+                let result = match msg {
+                    PingPong(msg) => {
+                        if msg.is_ping() {
+                            self.on_message_ping(msg).await
+                        } else {
+                            self.on_message_pong(msg).await
+                        }
+                    }
+                    _ => Ok(()),
+                };
+                if let Err(error) = result {
+                    logj::error!("Peer message handler error: {}", error);
+                    break;
                 }
             }
         });
     }
 
-    // `unsafe` and `unwrap`... but we have one buffer which used for most of messages.
-    // If buffer small we allocated bigger one, which will be dropped after reading message.
+    #[allow(clippy::borrowed_box)]
     async fn read_message(
         self: &Arc<Self>,
-        read_buf: &mut BytesMut,
+        mut read_buf: &mut Box<BytesMut>,
     ) -> Result<protocol::Message, SendRecvError> {
         let mut payload_size_buf = [0u8; 4];
         let mut stream = self.stream_rx.lock().await;
-        let mut read_buf2;
 
         if let Err(error) = stream.read_exact(&mut payload_size_buf).await {
             return Err(SendRecvError::Io(error));
@@ -429,14 +478,12 @@ impl Peer {
         }
 
         let msg_size = payload_size + 2;
-        let mut buf = if msg_size <= read_buf.capacity() {
-            read_buf
-        } else {
-            read_buf2 = BytesMut::with_capacity(msg_size);
-            &mut read_buf2
+        if msg_size > read_buf.capacity() {
+            let size = std::cmp::max(msg_size, 128 * 1024);
+            *read_buf = Box::new(BytesMut::with_capacity(size));
         };
 
-        let bytes = buf.bytes_mut();
+        let bytes = read_buf.bytes_mut();
         let bytes = unsafe {
             core::slice::from_raw_parts_mut(
                 bytes[0].as_mut_ptr(),
@@ -449,16 +496,28 @@ impl Peer {
             return Err(SendRecvError::Io(error));
         }
         unsafe {
-            buf.advance_mut(bytes.len());
+            read_buf.advance_mut(bytes.len());
         }
 
-        Ok(protocol::Message::decode(&mut buf).map_err(|_| SendRecvError::Decode)?)
+        Ok(protocol::Message::decode(&mut read_buf).map_err(SendRecvError::Decode)?)
     }
 
-    // pub async fn send_message(&self, ?) -> Result<(), ?> {
-    //     // should lock `stream_tx`, otherwise other fut can produce mixed write
-    //     self.stream.lock()
-    // }
+    async fn on_message_ping(
+        self: &Arc<Self>,
+        msg: protocol::PingPong,
+    ) -> Result<(), std::convert::Infallible> {
+        let msg = protocol::PingPong::build_pong(msg.sequence());
+        Arc::clone(self).send_message_spawn(protocol::Message::PingPong(msg));
+        Ok(())
+    }
+
+    async fn on_message_pong(
+        self: &Arc<Self>,
+        _msg: protocol::PingPong,
+    ) -> Result<(), std::convert::Infallible> {
+        // TODO
+        Ok(())
+    }
 }
 
 quick_error! {
@@ -542,8 +601,11 @@ quick_error! {
         PayloadTooBig(size: usize) {
             display("Message payload too big: {}", size)
         }
-        Decode {
-            display("")
+        Encode(error: protocol::EncodeError) {
+            display("Message encode error: {}", error)
+        }
+        Decode(error: protocol::DecodeError) {
+            display("Message decode error: {}", error)
         }
     }
 }
