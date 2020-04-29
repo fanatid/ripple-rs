@@ -18,7 +18,7 @@ quick-error = "1.2.3"
 rand = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
-tokio = { version = "0.2", features = ["io-util", "tcp", "sync", "dns"] }
+tokio = { version = "0.2", features = ["io-util", "tcp", "time", "sync", "dns"] }
 tokio-tls = "0.3.0"
 # local
 bs58_ripple = { path = "../bs58_ripple" }

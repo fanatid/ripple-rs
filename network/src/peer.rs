@@ -27,6 +27,12 @@ use super::NetworkId;
 //     pub fn node_key
 // }
 
+#[derive(Debug)]
+struct PeerPing {
+    pub seq: Option<u32>,
+    pub no_ping: u8,
+}
+
 /// Single connection to ripple node.
 #[derive(Debug)]
 pub struct Peer {
@@ -35,6 +41,7 @@ pub struct Peer {
     network_id: NetworkId,
     //
     peer_addr: SocketAddr,
+    ping_data: Mutex<PeerPing>,
     // connection is complete mess right now, move to own struct
     // (mix of openssl + TcpStream + ReadHalf/WriteHalf + BufStream?)
     ssl: &'static SslRef,
@@ -81,6 +88,10 @@ impl Peer {
             node_key,
             network_id: NetworkId::Main,
             peer_addr,
+            ping_data: Mutex::new(PeerPing {
+                no_ping: 0,
+                seq: None,
+            }),
             ssl,
             stream_tx: Mutex::new(stream_tx),
             stream_rx: Mutex::new(stream_rx),
@@ -91,7 +102,8 @@ impl Peer {
     pub async fn connect(self: &Arc<Self>) -> Result<(), HandshakeError> {
         self.handshake_send_request().await?;
         self.handshake_read_response().await?;
-        Arc::clone(&self).read_messages();
+        Arc::clone(&self).spawn_read_messages();
+        Arc::clone(&self).spawn_ping_loop();
         Ok(())
     }
 
@@ -308,7 +320,7 @@ impl Peer {
             },
             _ => Err(HandshakeError::UnexpectedHttpStatus(
                 code,
-                String::from_utf8_lossy(&buf).to_string(),
+                String::from_utf8_lossy(&buf).trim().to_string(),
             )),
         }
     }
@@ -373,6 +385,30 @@ impl Peer {
         }
     }
 
+    /// Send ping message in loop for checking that peer is alive.
+    fn spawn_ping_loop(self: Arc<Peer>) {
+        let _join_handle = tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(8);
+            loop {
+                tokio::time::delay_for(interval).await;
+
+                let mut ping = self.ping_data.lock().await;
+
+                ping.no_ping += 1;
+                if ping.no_ping > 10 {
+                    // TODO: shutdown
+                }
+
+                if ping.seq.is_none() {
+                    ping.seq = Some(rand::random::<u32>());
+
+                    let msg = protocol::PingPong::build_ping(ping.seq);
+                    Arc::clone(&self).spawn_send_message(protocol::Message::PingPong(msg));
+                }
+            }
+        });
+    }
+
     /// Send message to peer.
     pub async fn send_message(&self, msg: protocol::Message) -> Result<(), SendRecvError> {
         let size = msg.encoded_len();
@@ -387,7 +423,7 @@ impl Peer {
     }
 
     /// Send message to peer in new asynchronous task.
-    pub fn send_message_spawn(self: Arc<Self>, msg: protocol::Message) {
+    pub fn spawn_send_message(self: Arc<Self>, msg: protocol::Message) {
         let _join_handle = tokio::spawn(async move {
             // TODO: shutdown
             if let Err(error) = self.send_message(msg).await {
@@ -397,7 +433,7 @@ impl Peer {
     }
 
     /// Read message from peer.
-    fn read_messages(self: Arc<Peer>) {
+    fn spawn_read_messages(self: Arc<Peer>) {
         let _join_handle = tokio::spawn(async move {
             // bytes::BytesMut not shrink back in any case
             // We can have max message 64MiB, in worst case there will be 64MiB per peer.
@@ -507,15 +543,20 @@ impl Peer {
         msg: protocol::PingPong,
     ) -> Result<(), std::convert::Infallible> {
         let msg = protocol::PingPong::build_pong(msg.sequence());
-        Arc::clone(self).send_message_spawn(protocol::Message::PingPong(msg));
+        Arc::clone(self).spawn_send_message(protocol::Message::PingPong(msg));
         Ok(())
     }
 
     async fn on_message_pong(
         self: &Arc<Self>,
-        _msg: protocol::PingPong,
+        msg: protocol::PingPong,
     ) -> Result<(), std::convert::Infallible> {
-        // TODO
+        let mut ping = self.ping_data.lock().await;
+        if ping.seq == msg.sequence() {
+            ping.seq = None;
+            ping.no_ping = 0;
+        }
+
         Ok(())
     }
 }
