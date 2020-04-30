@@ -10,11 +10,16 @@
 
 //! Ripple protocol messages in [protobuf](https://developers.google.com/protocol-buffers).
 
+#![feature(cell_leak)]
+
+use std::cell::{Ref, RefCell};
+use std::net::SocketAddr;
+
 use bytes::{Buf, BufMut};
 use prost::Message as _;
 pub use prost::{DecodeError, EncodeError};
 
-use ripple::{tm_ping::PingType, *};
+use ripple::{tm_endpoints::TmEndpointv2, tm_ping::PingType, *};
 
 // Export `prost` generated enums/structs.
 pub mod ripple;
@@ -36,21 +41,36 @@ pub trait EncodeDecode {
 
 // Implement EncodeDecode trait for struct.
 macro_rules! impl_encode_decode {
-    ($type:ty) => {
+    ($type:ty, $inner:ty) => {
         impl EncodeDecode for $type {
             type Type = $type;
 
             fn encoded_len(&self) -> usize {
-                self.inner.encoded_len()
+                self.to_inner().encoded_len()
             }
 
             fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), EncodeError> {
-                self.inner.encode(buf)
+                self.to_inner().encode(buf)
             }
 
             fn decode<B: Buf>(buf: &mut B) -> Result<Self::Type, DecodeError> {
-                let inner = TmPing::decode(buf)?;
+                let inner = <$inner>::decode(buf)?;
                 Ok(Self::Type::from_inner(inner))
+            }
+        }
+    };
+}
+
+// Default functions for manipulating with inner.
+macro_rules! impl_inner_fns {
+    ($type:ty, $inner:ty) => {
+        impl $type {
+            fn from_inner(inner: $inner) -> Self {
+                Self { inner }
+            }
+
+            fn to_inner(&self) -> &$inner {
+                &self.inner
             }
         }
     };
@@ -69,7 +89,7 @@ pub enum Message {
     /// Cluster related. Ignore.
     Cluster(TmCluster),
     /// Receive other peers endpoints. Rippled sent such message every ~1s.
-    Endpoints(TmEndpoints),
+    Endpoints(Endpoints),
     /// Relayed transaction. Need more info.
     Transaction(TmTransaction),
     /// Request ledger information, can be relayed. Need more info.
@@ -192,7 +212,7 @@ impl EncodeDecode for Message {
             MtManifests => Message::Manifests(TmManifests::decode(buf)?),
             MtPing => Message::PingPong(PingPong::decode(buf)?),
             MtCluster => Message::Cluster(TmCluster::decode(buf)?),
-            MtEndpoints => Message::Endpoints(TmEndpoints::decode(buf)?),
+            MtEndpoints => Message::Endpoints(Endpoints::decode(buf)?),
             MtTransaction => Message::Transaction(TmTransaction::decode(buf)?),
             MtGetLedger => Message::GetLedger(TmGetLedger::decode(buf)?),
             MtLedgerData => Message::LedgerData(TmLedgerData::decode(buf)?),
@@ -210,19 +230,16 @@ impl EncodeDecode for Message {
     }
 }
 
-/// Ping/Pong message.
+/// Ping/Pong message. This messages used for checking that connected peer is alive.
 #[derive(Debug)]
 pub struct PingPong {
     inner: TmPing,
 }
 
-impl_encode_decode!(PingPong);
+impl_encode_decode!(PingPong, TmPing);
+impl_inner_fns!(PingPong, TmPing);
 
 impl PingPong {
-    fn from_inner(inner: TmPing) -> Self {
-        Self { inner }
-    }
-
     fn build(r#type: PingType, seq: Option<u32>) -> Self {
         let r#type = r#type as i32;
         Self::from_inner(TmPing {
@@ -251,5 +268,69 @@ impl PingPong {
     /// Return message sequence.
     pub fn sequence(&self) -> Option<u32> {
         self.inner.seq
+    }
+}
+
+/// Represent exactly one endpoint.
+#[allow(missing_docs)]
+#[derive(Debug)]
+pub struct Endpoint {
+    pub addr: SocketAddr,
+    pub hops: u32,
+}
+
+/// Endpoints message. TODO: more
+#[derive(Debug)]
+pub struct Endpoints {
+    inner: RefCell<TmEndpoints>,
+    /// Vec of [`Endpoint`][Endpoint].
+    pub endpoints: Vec<Endpoint>,
+}
+
+impl_encode_decode!(Endpoints, TmEndpoints);
+
+impl Default for Endpoints {
+    fn default() -> Self {
+        Self::from_inner(TmEndpoints {
+            // Not used in rippled, but set to 2
+            version: 2,
+            endpoints: vec![],
+            endpoints_v2: vec![],
+        })
+    }
+}
+
+impl Endpoints {
+    fn from_inner(inner: TmEndpoints) -> Self {
+        // We ignore `endpoints`, because they outdated.
+        // `endpoints_v2` have both IPv4 & IPv6.
+        let endpoints = inner
+            .endpoints_v2
+            .iter()
+            .filter_map(|s| {
+                s.endpoint
+                    .parse::<SocketAddr>()
+                    .map(|addr| Endpoint { addr, hops: s.hops })
+                    .ok()
+            })
+            .collect();
+
+        Self {
+            inner: RefCell::new(inner),
+            endpoints,
+        }
+    }
+
+    fn to_inner(&self) -> &TmEndpoints {
+        self.inner.borrow_mut().endpoints_v2 = self
+            .endpoints
+            .iter()
+            .map(|s| TmEndpointv2 {
+                endpoint: s.addr.to_string(),
+                hops: s.hops,
+            })
+            .collect();
+
+        Ref::leak(self.inner.borrow())
     }
 }

@@ -480,6 +480,7 @@ impl Peer {
                             self.on_message_pong(msg).await
                         }
                     }
+                    Endpoints(msg) => self.on_message_endpoints(msg).await,
                     _ => Ok(()),
                 };
                 if let Err(error) = result {
@@ -562,6 +563,13 @@ impl Peer {
             ping.no_ping = 0;
         }
 
+        Ok(())
+    }
+
+    async fn on_message_endpoints(
+        self: &Arc<Self>,
+        _msg: protocol::Endpoints,
+    ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
 }
