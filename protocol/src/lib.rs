@@ -99,6 +99,15 @@ pub enum Message {
     Validatorlist(TmValidatorList),
 }
 
+impl Message {
+    /// Check that message type is valid.
+    pub fn is_valid_type<B: Buf>(buf: &B) -> bool {
+        let bytes = buf.bytes();
+        let ty = ((bytes[0] as u16) << 8) + (bytes[1] as u16);
+        MessageType::is_valid(ty as i32)
+    }
+}
+
 impl EncodeDecode for Message {
     type Type = Message;
 

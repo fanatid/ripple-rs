@@ -495,47 +495,52 @@ impl Peer {
         self: &Arc<Self>,
         mut read_buf: &mut Box<BytesMut>,
     ) -> Result<protocol::Message, SendRecvError> {
-        let mut payload_size_buf = [0u8; 4];
-        let mut stream = self.stream_rx.lock().await;
+        loop {
+            let mut payload_size_buf = [0u8; 4];
+            let mut stream = self.stream_rx.lock().await;
 
-        if let Err(error) = stream.read_exact(&mut payload_size_buf).await {
-            return Err(SendRecvError::Io(error));
+            if let Err(error) = stream.read_exact(&mut payload_size_buf).await {
+                return Err(SendRecvError::Io(error));
+            }
+
+            if payload_size_buf[0] & 0xFC != 0 {
+                let error = SendRecvError::UnknowVersionHeader(payload_size_buf[0]);
+                return Err(error);
+            }
+
+            let payload_size = u32::from_be_bytes(payload_size_buf) as usize;
+            if payload_size > 64 * 1024 * 1024 {
+                let error = SendRecvError::PayloadTooBig(payload_size);
+                return Err(error);
+            }
+
+            let msg_size = payload_size + 2;
+            if msg_size > read_buf.capacity() {
+                let size = std::cmp::max(msg_size, 128 * 1024);
+                *read_buf = Box::new(BytesMut::with_capacity(size));
+            };
+
+            let bytes = read_buf.bytes_mut();
+            let bytes = unsafe {
+                core::slice::from_raw_parts_mut(
+                    bytes[0].as_mut_ptr(),
+                    std::cmp::min(bytes.len(), msg_size),
+                )
+            };
+            assert!(bytes.len() >= msg_size, "Not enough bytes for read message");
+
+            if let Err(error) = stream.read_exact(bytes).await {
+                return Err(SendRecvError::Io(error));
+            }
+            unsafe {
+                read_buf.advance_mut(bytes.len());
+            }
+
+            if protocol::Message::is_valid_type(&read_buf) {
+                let msg = protocol::Message::decode(&mut read_buf);
+                return Ok(msg.map_err(SendRecvError::Decode)?);
+            }
         }
-
-        if payload_size_buf[0] & 0xFC != 0 {
-            let error = SendRecvError::UnknowVersionHeader(payload_size_buf[0]);
-            return Err(error);
-        }
-
-        let payload_size = u32::from_be_bytes(payload_size_buf) as usize;
-        if payload_size > 64 * 1024 * 1024 {
-            let error = SendRecvError::PayloadTooBig(payload_size);
-            return Err(error);
-        }
-
-        let msg_size = payload_size + 2;
-        if msg_size > read_buf.capacity() {
-            let size = std::cmp::max(msg_size, 128 * 1024);
-            *read_buf = Box::new(BytesMut::with_capacity(size));
-        };
-
-        let bytes = read_buf.bytes_mut();
-        let bytes = unsafe {
-            core::slice::from_raw_parts_mut(
-                bytes[0].as_mut_ptr(),
-                std::cmp::min(bytes.len(), msg_size),
-            )
-        };
-        assert!(bytes.len() >= msg_size, "Not enough bytes for read message");
-
-        if let Err(error) = stream.read_exact(bytes).await {
-            return Err(SendRecvError::Io(error));
-        }
-        unsafe {
-            read_buf.advance_mut(bytes.len());
-        }
-
-        Ok(protocol::Message::decode(&mut read_buf).map_err(SendRecvError::Decode)?)
     }
 
     async fn on_message_ping(
