@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio_tls::TlsStream;
 
 use super::NetworkId;
+use super::PeerTable;
 
 // /// Peer builder.
 // #[derive(Debug)]
@@ -38,6 +39,7 @@ struct PeerPing {
 pub struct Peer {
     // node_key as ref?
     node_key: Arc<Secp256k1Keys>,
+    peer_table: Arc<PeerTable>,
     network_id: NetworkId,
     //
     peer_addr: SocketAddr,
@@ -60,6 +62,7 @@ impl Peer {
     pub async fn from_addr(
         addr: SocketAddr,
         node_key: Arc<Secp256k1Keys>,
+        peer_table: Arc<PeerTable>,
     ) -> Result<Arc<Peer>, ConnectError> {
         let stream = TcpStream::connect(addr).await.map_err(ConnectError::Io)?;
         stream.set_nodelay(true).map_err(ConnectError::Io)?;
@@ -86,6 +89,7 @@ impl Peer {
 
         Ok(Arc::new(Peer {
             node_key,
+            peer_table,
             network_id: NetworkId::Main,
             peer_addr,
             ping_data: Mutex::new(PeerPing {
@@ -568,8 +572,13 @@ impl Peer {
 
     async fn on_message_endpoints(
         self: &Arc<Self>,
-        _msg: protocol::Endpoints,
+        msg: protocol::Endpoints,
     ) -> Result<(), std::convert::Infallible> {
+        let mut endpoints = msg.endpoints;
+        for ep in endpoints.iter_mut().filter(|ep| ep.hops == 0) {
+            ep.addr = self.peer_addr;
+        }
+        self.peer_table.on_endpoints(endpoints).await;
         Ok(())
     }
 }

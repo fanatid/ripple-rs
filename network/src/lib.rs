@@ -19,13 +19,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crypto::Secp256k1Keys;
-use futures::future::join_all;
-use rand::seq::SliceRandom;
-use tokio::net::lookup_host;
 
 pub use peer::Peer;
+pub use peer_table::PeerTable;
 
 mod peer;
+mod peer_table;
 
 /// Peers collection and communication through ripple protocol.
 #[derive(Debug)]
@@ -33,6 +32,7 @@ pub struct Network {
     // nodes_max: usize,
     // peers: Vec<Peer>,
     node_key: Arc<Secp256k1Keys>,
+    peer_table: Arc<PeerTable>,
 }
 
 impl Network {
@@ -43,22 +43,19 @@ impl Network {
             // nodes_max: 1,
             // peers: vec![],
             node_key: Arc::new(Secp256k1Keys::random()),
+            peer_table: Arc::new(PeerTable::default()),
         }
     }
 
     /// Start network. Resolve nodes addrs, connect and communicate.
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut addrs = Self::load_peer_addrs().await;
+        self.peer_table.load_peer_addrs().await;
 
         let peer = loop {
-            addrs.shuffle(&mut rand::thread_rng());
-            let addr = match addrs.pop() {
+            let addr = match self.peer_table.get_peer_address().await {
                 Some(addr) => addr,
                 None => break None,
             };
-            if addr.is_ipv6() {
-                continue;
-            }
 
             match self.connect_to(addr).await {
                 Ok(peer) => break Some(peer),
@@ -68,10 +65,9 @@ impl Network {
                 Err(PeerError::Handshake(error)) => {
                     logj::error!("Failed handshake with peer {}: {}", addr, error);
                 }
-                Err(PeerError::Unavailable(mut ips)) => {
+                Err(PeerError::Unavailable(ips)) => {
                     logj::error!("Peer unavailable, give {} peers", ips.len());
-                    addrs.append(&mut ips);
-                    addrs.dedup();
+                    self.peer_table.on_redirect(ips).await;
                 }
             }
         };
@@ -85,9 +81,15 @@ impl Network {
         Ok(())
     }
 
-    /// Connect to resolved nodes.
+    /// Connect to address.
     pub async fn connect_to(&self, addr: SocketAddr) -> Result<Arc<Peer>, PeerError> {
-        match Peer::from_addr(addr, self.node_key.clone()).await {
+        match Peer::from_addr(
+            addr,
+            Arc::clone(&self.node_key),
+            Arc::clone(&self.peer_table),
+        )
+        .await
+        {
             Ok(peer) => match peer.connect().await {
                 Ok(_) => Ok(peer),
                 Err(peer::HandshakeError::Unavailable(ips)) => Err(PeerError::Unavailable(ips)),
@@ -95,44 +97,6 @@ impl Network {
             },
             Err(error) => Err(PeerError::Connect(error)),
         }
-    }
-
-    /// Return pre-defined nodes.
-    /// https://github.com/ripple/rippled/blob/1.5.0/src/ripple/overlay/impl/OverlayImpl.cpp#L536-L544
-    const fn get_bootstrap_peer_nodes() -> [&'static str; 3] {
-        [
-            // Pool of servers operated by Ripple Labs Inc. - https://ripple.com
-            "r.ripple.com:51235",
-            // Pool of servers operated by Alloy Networks - https://www.alloy.ee
-            "zaphod.alloy.ee:51235",
-            // Pool of servers operated by ISRDC - https://isrdc.in
-            "sahyadri.isrdc.in:51235",
-        ]
-    }
-
-    /// Resolve nodes to addrs.
-    async fn get_bootstrap_peer_addrs() -> Vec<SocketAddr> {
-        let nodes = Self::get_bootstrap_peer_nodes();
-
-        let futs = nodes.iter().map(|node| async move {
-            match lookup_host(node).await {
-                Ok(addrs) => addrs.collect(),
-                Err(error) => {
-                    logj::error!("Failed resolve bootstrap node {}: {}", node, error);
-                    vec![]
-                }
-            }
-        });
-        let addrs = join_all(futs).await;
-        addrs.into_iter().flatten().collect()
-    }
-
-    /// Load peers addresses from storage or use bootstrap addresses.
-    async fn load_peer_addrs() -> Vec<SocketAddr> {
-        // TODO: load from storage
-        let mut addrs = Self::get_bootstrap_peer_addrs().await;
-        addrs.dedup();
-        addrs
     }
 }
 
